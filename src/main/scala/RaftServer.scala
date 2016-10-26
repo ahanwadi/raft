@@ -16,16 +16,14 @@ object RaftServer {
   type Index = Int
 
   abstract case class LogEntry(term: Term)
-  case class State(currentTerm: Term = 0, votedFor: Option[ServerId] = None, log: Array[LogEntry] = Array())
+  case class State(currentTerm: Term = 0, votedFor: Option[ServerId] = None)
 
-  abstract class TermEvent { val term: Term }
-  case class SwitchToFollower(term: Term, leader: Option[ServerId]) extends TermEvent
-  case class SwitchToCandidate(term: Term) extends TermEvent
+  abstract class TermEvent
+  case class SwitchToFollower(term: Term, leader: Option[ServerId] = None) extends TermEvent
+  case class SwitchToCandidate() extends TermEvent
+  case class AppendEntries(term: Term, leader: ServerId)
 
-  case class AppendEntries(term: Term, leader: ServerId, prevLogIndex: Index, prevLogTerm: Term,
-                           entries: Array[LogEntry] = Array(), leaderCommitIndex: Index)
-
-  case class RequestVote(term: Term, candidate: ServerId, lastLogIndex: Index, lastLogTerm: Term)
+  case class RequestVote(term: Term, candidate: ServerId)
   case class Response(term: Term, id: ServerId, result: Boolean)
 
   case class Server(id: ServerId, address: String)
@@ -52,21 +50,52 @@ class RaftServer extends PersistentActor with ActorLogging {
 
   var state = State()
 
+  def switchToFollower(term: Term, leader: Option[ServerId] = None, cb: Option[Cancellable] = None) {
+    cb.map(_.cancel())
+
+    if (term > state.currentTerm || leader != state.votedFor) {
+      persist(SwitchToFollower(state.currentTerm, leader))(handleEvent)
+      saveSnapshot(state)
+    }
+
+    /* If the leader fails to send heartbeat within the election timeout
+     the server switches to candidate
+     */
+    val cb1 = context.system.scheduler.scheduleOnce(electionTimeout, self, ElectionTimedout())
+    context.become(follower(cb1))
+  }
+
+  def switchToCandidate(cb: Option[Cancellable] = None) {
+    cb.map(_.cancel())
+
+    persist(SwitchToCandidate())(handleEvent)
+    saveSnapshot(state)
+    context.actorSelection("../*") !  RequestVote(state.currentTerm, myId)
+    val cb1 = context.system.scheduler.scheduleOnce(electionTimeout, self, ElectionTimedout())
+    context.become(candidate(Set(myId), cb1))
+  }
+
+  def switchToLeader(cb: Option[Cancellable] = None) {
+    cb.map(_.cancel())
+    context.actorSelection("../*") ! AppendEntries(state.currentTerm, myId)
+    val cb1 = context.system.scheduler.scheduleOnce(electionTimeout/2, self, Heartbeat())
+    context.become(leader(cb1))
+  }
+
   val handleEvent: PartialFunction[Any, Unit] = {
 
+    /* We need to save both the term and votedFor as we are allowed to vote for only one candidate per term */
     case SwitchToFollower(newTerm, leader) => {
-      state = state.copy(currentTerm = newTerm)
-      /* If the leader fails to send heartbeat within the election timeout
-       the server switches to candidate
-       */
-      context.system.scheduler.scheduleOnce(electionTimeout, self, ElectionTimedout())
-      context.become(follower)
+      state = state.copy(currentTerm = newTerm, votedFor = leader)
     }
 
-    case SwitchToCandidate(term) => {
-      state = state.copy(currentTerm = term)
-      context.actorSelection("../*") !  RequestVote(term, myId, 0, 0)
+    /* We only switch from follower to candidate only when the leader for the current term
+     fails to heartbeat within the timeout period. Since, servers vote for at most one candidate in any given
+     term, we have to increment the term and vote for ourselves */
+    case SwitchToCandidate => {
+      state = state.copy(currentTerm = state.currentTerm + 1, votedFor = Some(myId))
     }
+
   }
 
   val receiveCommand: Receive = {
@@ -74,58 +103,86 @@ class RaftServer extends PersistentActor with ActorLogging {
       /* A server always starts as a follower, waiting for heartbeat(s)
        from the leader.
        */
-      handleEvent(SwitchToFollower(state.currentTerm, None))
+      switchToFollower(state.currentTerm)
   }
 
-  val leader: Receive = {
+  def leader(cb: Cancellable): Receive = {
     case Heartbeat =>
-      context.actorSelection("../*") ! AppendEntries(state.currentTerm, myId, 0, 0, Array(), 0)
+      switchToLeader(Some(cb))
+
+    case Response(term, server, success) if term > state.currentTerm =>
+      switchToFollower(term, Some(server), Some(cb))
+
+    case Response(term, server, successful) if term == state.currentTerm && successful =>
+      log.info(s"Successful heartbeat response from {server} for the {term}")
   }
 
-  def candidate(voters: List[ServerId]): Receive = {
+  def candidate(voters: Set[ServerId] = Set(myId), cb: Cancellable): Receive = {
+
+    case ElectionTimedout =>
+      log.error(s"Failed to receive votes within the timeout for the {state.currentTerm}")
+      switchToCandidate(Some(cb))
+
+    case RequestVote(term, candidate) if term > state.currentTerm =>
+      switchToFollower(term, Some(candidate), Some(cb))
+      sender() ! Response(state.currentTerm, state.votedFor.get, true)
+
     case Response(term, server, successful) if term > state.currentTerm =>
-      persist(SwitchToFollower(term, Some(server)))(handleEvent)
-      saveSnapshot(state)
-    case Response(term, server, successful) if successful =>
-      val newVoters = server :: voters
-      if (newVoters.length > raftServers.length / 2) {
-        context.system.scheduler.scheduleOnce(electionTimeout/2, self, Heartbeat())
-        context.become(leader)
+      switchToFollower(term, Some(server), Some(cb))
+
+    case Response(term, server, successful) if successful && term == state.currentTerm =>
+      val newVoters: Set[ServerId] = voters + server
+      if (newVoters.size > raftServers.length / 2) {
+        switchToLeader(Some(cb))
+      } else {
+        context.become(candidate(newVoters, cb))
       }
-      else
-        context.become(candidate(newVoters))
+
+    case AppendEntries(term, leader) if term < state.currentTerm =>
+      sender() ! Response(state.currentTerm, state.votedFor.getOrElse(myId), false)
+
+    case AppendEntries(term, leader) if term >= state.currentTerm =>
+      log.info(s"New leader {leader} with {term}. Switching to follower.")
+      switchToFollower(term, Some(leader), Some(cb))
+      sender() ! Response(state.currentTerm, myId, true)
   }
 
-  val follower: Receive = {
+  /* This state should be split into learner and follower.
+   A server stays in listener until it timeouts (-> candidate term+1) or gets heartbeat from the leader (-> follower term of the leader).
+   */
+  def follower(cb: Cancellable): Receive = {
     case ElectionTimedout =>
       log.info(s"Failed to receive heartbeat within {electionTimeout}.")
-      persist(SwitchToCandidate(state.currentTerm + 1))(handleEvent)
-      // TODO: Should we call saveSnapshot here or in the handleEvent
-      saveSnapshot(state)
-      context.become(candidate(List()))
+      switchToCandidate(Some(cb))
 
-    case AppendEntries(term, leader, _, _, Array(), _) if term == state.currentTerm =>
-      log.debug(s"heartbeat received for {term} from {leader}")
-      sender() ! Response(state.currentTerm, myId, true)
-
-    case AppendEntries(term, leader, _, _, Array(), _) if term > state.currentTerm =>
-      log.info(s"New leader {leader} with {term}. Switching to follower.")
-      persist(SwitchToFollower(term, Some(leader)))(handleEvent)
-      // TODO: Should we call saveSnapshot here or in the handleEvent
-      saveSnapshot(state)
-      sender() ! Response(state.currentTerm, myId, true)
-
-    case RequestVote(term, candidate, lastLogIndex, lastLogTerm) if term < state.currentTerm =>
+    case AppendEntries(term, leader) if term < state.currentTerm =>
+      log.debug(s"stale heartbeat received for {term} from {leader}")
       sender() ! Response(state.currentTerm, myId, false)
 
-    case RequestVote(term, candidate, lastLogIndex, lastLogTerm) if state.votedFor.getOrElse(candidate) == candidate =>
+    case AppendEntries(term, leader) if term == state.currentTerm =>
+      log.debug(s"heartbeat received for {term} from {leader}")
+      switchToFollower(term, Some(leader), Some(cb))
       sender() ! Response(state.currentTerm, myId, true)
+
+    case AppendEntries(term, leader) if term > state.currentTerm =>
+      log.info(s"New leader {leader} with {term}. Switching to follower.")
+      switchToFollower(term, Some(leader), Some(cb))
+      sender() ! Response(state.currentTerm, myId, true)
+
+    case RequestVote(term, candidate) if term < state.currentTerm =>
+      sender() ! Response(state.currentTerm, myId, false)
+
+    case RequestVote(term, candidate) if term >= state.currentTerm || state.votedFor.getOrElse(candidate) == candidate =>
+      switchToFollower(term, Some(candidate), Some(cb))
+      sender() ! Response(state.currentTerm, myId, true)
+
+    case _ =>
+      sender() ! Response(state.currentTerm, myId, false)
   }
 
   val receiveRecover: Receive = {
-    case evt: TermEvent => state = state.copy(currentTerm = evt.term)
+    case evt: TermEvent => handleEvent(evt)
     case SnapshotOffer(_, snapshot: State) => state = snapshot
   }
 
 }
-

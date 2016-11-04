@@ -6,6 +6,7 @@ import akka.persistence._
 import com.typesafe.config._
 import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext.Implicits.global
+import akka.event.LoggingReceive
 
 object RaftServer {
 
@@ -36,17 +37,18 @@ import RaftServer._
 
 class RaftServer extends PersistentActor with ActorLogging {
 
-  lazy val raftConfig: Config = context.system.settings.config.atKey("raft")
+  val raftConfig: Config = context.system.settings.config.getConfig("raft")
 
   lazy val raftServers = raftConfig.getObjectList("servers").asScala.toList
     .map {_.toConfig()}
     .map { srvr => Server(srvr.getInt("id"), srvr.getString("address"))}
 
-
   lazy val electionTimeout: FiniteDuration = Duration.fromNanos(raftConfig.getDuration("election-timeout").toNanos())
 
   lazy val myId: ServerId = raftConfig.getInt("myId")
   override def persistenceId = "raft-server-" + myId
+
+  log.info(s"Initialization complete with $persistenceId and timeout of ${electionTimeout}")
 
   var state = State()
 
@@ -58,10 +60,16 @@ class RaftServer extends PersistentActor with ActorLogging {
       saveSnapshot(state)
     }
 
+    val s = context.self
     /* If the leader fails to send heartbeat within the election timeout
      the server switches to candidate
      */
-    val cb1 = context.system.scheduler.scheduleOnce(electionTimeout, self, ElectionTimedout())
+    val cb1 = context.system.scheduler.scheduleOnce(electionTimeout) {
+      log.info("Got Election timeout")
+      s ! ElectionTimedout()
+    }
+
+    log.info(s"${s} becoming follower")
     context.become(follower(cb1))
   }
 
@@ -92,18 +100,14 @@ class RaftServer extends PersistentActor with ActorLogging {
     /* We only switch from follower to candidate only when the leader for the current term
      fails to heartbeat within the timeout period. Since, servers vote for at most one candidate in any given
      term, we have to increment the term and vote for ourselves */
-    case SwitchToCandidate => {
+    case SwitchToCandidate() => {
       state = state.copy(currentTerm = state.currentTerm + 1, votedFor = Some(myId))
     }
 
   }
 
-  val receiveCommand: Receive = {
-    case RecoveryCompleted =>
-      /* A server always starts as a follower, waiting for heartbeat(s)
-       from the leader.
-       */
-      switchToFollower(state.currentTerm)
+  val receiveCommand: Receive = LoggingReceive.withLabel("testing") {
+    case "getState" => log.debug(s"Got getState: ${state.currentTerm}, ${state.votedFor}"); sender() ! (state.currentTerm, state.votedFor)
   }
 
   def leader(cb: Cancellable): Receive = {
@@ -115,13 +119,19 @@ class RaftServer extends PersistentActor with ActorLogging {
 
     case Response(term, server, successful) if term == state.currentTerm && successful =>
       log.info(s"Successful heartbeat response from {server} for the {term}")
+
+    case z =>
+      log.info(s"$z")
   }
 
-  def candidate(voters: Set[ServerId] = Set(myId), cb: Cancellable): Receive = {
+  def candidate(voters: Set[ServerId] = Set(myId), cb: Cancellable): Receive = LoggingReceive.withLabel("candidate") {
 
-    case ElectionTimedout =>
-      log.error(s"Failed to receive votes within the timeout for the {state.currentTerm}")
+    case x: ElectionTimedout =>
+      log.error(s"Failed to receive votes within the timeout for the ${state.currentTerm}")
       switchToCandidate(Some(cb))
+
+    case RequestVote(term, candidate) if term == state.currentTerm && state.votedFor.isEmpty =>
+      sender() ! Response(state.currentTerm, myId, true)
 
     case RequestVote(term, candidate) if term > state.currentTerm =>
       switchToFollower(term, Some(candidate), Some(cb))
@@ -142,30 +152,40 @@ class RaftServer extends PersistentActor with ActorLogging {
       sender() ! Response(state.currentTerm, state.votedFor.getOrElse(myId), false)
 
     case AppendEntries(term, leader) if term >= state.currentTerm =>
-      log.info(s"New leader {leader} with {term}. Switching to follower.")
+      log.info(s"New leader ${leader} with ${term}. Switching to follower.")
       switchToFollower(term, Some(leader), Some(cb))
       sender() ! Response(state.currentTerm, myId, true)
+
+    case (x: ServerId, y: Option[ServerId]) =>
+      log.info("Skip")
+
+    case "getState" =>
+      log.info(s"getState: sending ${state.currentTerm}, ${state.votedFor}")
+      sender() ! (state.currentTerm, state.votedFor)
+
+    case z =>
+      log.info(s"Got message: ${z}")
   }
 
   /* This state should be split into learner and follower.
    A server stays in listener until it timeouts (-> candidate term+1) or gets heartbeat from the leader (-> follower term of the leader).
    */
-  def follower(cb: Cancellable): Receive = {
-    case ElectionTimedout =>
-      log.info(s"Failed to receive heartbeat within {electionTimeout}.")
+  def follower(cb: Cancellable): Receive = LoggingReceive.withLabel("other") {
+    case x: ElectionTimedout =>
+      log.info(s"Failed to receive heartbeat within ${electionTimeout}.")
       switchToCandidate(Some(cb))
 
     case AppendEntries(term, leader) if term < state.currentTerm =>
-      log.debug(s"stale heartbeat received for {term} from {leader}")
+      log.debug(s"stale heartbeat received for ${term} from ${leader}")
       sender() ! Response(state.currentTerm, myId, false)
 
     case AppendEntries(term, leader) if term == state.currentTerm =>
-      log.debug(s"heartbeat received for {term} from {leader}")
+      log.debug(s"heartbeat received for ${term} from ${leader}")
       switchToFollower(term, Some(leader), Some(cb))
       sender() ! Response(state.currentTerm, myId, true)
 
     case AppendEntries(term, leader) if term > state.currentTerm =>
-      log.info(s"New leader {leader} with {term}. Switching to follower.")
+      log.info(s"New leader ${leader} with ${term}. Switching to follower.")
       switchToFollower(term, Some(leader), Some(cb))
       sender() ! Response(state.currentTerm, myId, true)
 
@@ -176,13 +196,24 @@ class RaftServer extends PersistentActor with ActorLogging {
       switchToFollower(term, Some(candidate), Some(cb))
       sender() ! Response(state.currentTerm, myId, true)
 
-    case _ =>
-      sender() ! Response(state.currentTerm, myId, false)
+    case "getState" =>
+      log.info(s"getState: sending ${state.currentTerm}, ${state.votedFor}")
+      sender() ! (state.currentTerm, state.votedFor)
+
+    case y =>
+      log.info(s"Got generic message: $y")
   }
 
   val receiveRecover: Receive = {
+    case RecoveryCompleted =>
+      /* A server always starts as a follower, waiting for heartbeat(s)
+       from the leader.
+       */
+      log.info("Recovery completed, switching to follower")
+      switchToFollower(state.currentTerm)
     case evt: TermEvent => handleEvent(evt)
     case SnapshotOffer(_, snapshot: State) => state = snapshot
+    case x => log.debug(s"Got message in receiveRecover $x")
   }
 
 }

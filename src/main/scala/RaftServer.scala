@@ -1,12 +1,14 @@
 package raft
 
-import scala.concurrent.duration._
-import akka.actor._
-import akka.persistence._
-import com.typesafe.config._
 import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration._
+
+import RaftServer._
+import akka.actor._
 import akka.event.LoggingReceive
+import akka.persistence._
+import com.typesafe.config._
 
 object RaftServer {
 
@@ -32,8 +34,6 @@ object RaftServer {
   case class ElectionTimedout()
   case class Heartbeat()
 }
-
-import RaftServer._
 
 class RaftServer extends PersistentActor with ActorLogging {
 

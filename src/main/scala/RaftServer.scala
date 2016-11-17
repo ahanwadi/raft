@@ -18,7 +18,6 @@ object RaftServer {
 
   type Index = Int
 
-  abstract case class LogEntry(term: Term)
   case class State(currentTerm: Term = 0, votedFor: Option[ServerId] = None)
 
   abstract class TermEvent
@@ -89,6 +88,7 @@ class RaftServer extends PersistentActor with ActorLogging {
     val cb1 = context.system.scheduler.scheduleOnce(electionTimeout/2, self, Heartbeat())
     context.become(leader(cb1))
   }
+
 
   val handleEvent: PartialFunction[Any, Unit] = {
 

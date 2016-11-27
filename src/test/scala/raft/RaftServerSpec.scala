@@ -25,7 +25,7 @@ class RaftServerSpec() extends TestKit(ActorSystem("MySpec")) with ImplicitSende
   "A RaftServer actor" must {
     "start in follower mode" in {
       val raftServer = system.actorOf(Props[RaftServer])
-      raftServer ! "getState"
+      raftServer ! RaftServer.GetState
       expectMsg( (0, None) )
     }
   }
@@ -34,11 +34,12 @@ class RaftServerSpec() extends TestKit(ActorSystem("MySpec")) with ImplicitSende
     "eventually become candidate" in {
       val raftServer = system.actorOf(Props[RaftServer])
       eventually(timeout(10 seconds), interval(1 second)) {
-        raftServer ! "getState"
+        raftServer ! RaftServer.GetState
         expectMsgPF() {
           case (_, Some(0)) => ()
         }
       }
     }
   }
+
 }

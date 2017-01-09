@@ -18,6 +18,7 @@ object RaftServer {
 
   type Index = Int
 
+  // The persistent state stored by all servers.
   case class State(currentTerm: Term = 0, votedFor: Option[ServerId] = None)
 
   abstract class TermEvent
@@ -28,8 +29,6 @@ object RaftServer {
 
   case class RequestVote(term: Term, candidate: ServerId)
   case class Vote(term: Term, server: ServerId, votedFor: Option[ServerId], result: Boolean)
-
-  //case class Response(term: Term, votedFor: Option[ServerId], id: ServerId, result: Boolean)
 
   case class Server(id: ServerId, address: String)
 
@@ -88,7 +87,10 @@ class RaftServer extends PersistentActor with ActorLogging {
   def switchToCandidate(cb: Option[Cancellable] = None) {
     cb.map(_.cancel())
 
-    // We need to persist this as we implicitly vote for ourselves.
+    /*
+     * We need to persist this as we implicitly vote for ourselves and
+     * increment the term.
+     */
     persist(SwitchToCandidate())(handleEvent)
     saveSnapshot(state)
     context.actorSelection("../*") !  RequestVote(state.currentTerm, myId)
@@ -118,15 +120,16 @@ class RaftServer extends PersistentActor with ActorLogging {
     }
 
     /* We only switch from follower to candidate only when the leader for the current term
-     fails to heartbeat within the timeout period. Since, servers vote for at most one candidate in any given
-     term, we have to increment the term and vote for ourselves */
+     * fails to heartbeat within the timeout period. Since, servers vote for at most one candidate in any given
+     * term, we have to increment the term and vote for ourselves
+     */
     case SwitchToCandidate() => {
       state = state.copy(currentTerm = state.currentTerm + 1, votedFor = Some(myId))
     }
 
   }
 
-  val receiveCommand: Receive = LoggingReceive.withLabel("testing") {
+  val receiveCommand: Receive = LoggingReceive.withLabel("general") {
     case GetState =>
       log.debug(s"Got getState: ${state.currentTerm}, ${state.votedFor}")
       sender() ! (state.currentTerm, state.votedFor)
@@ -171,13 +174,16 @@ class RaftServer extends PersistentActor with ActorLogging {
       sender() ! Vote(state.currentTerm, myId, state.votedFor, true)
 
     case RequestVote(term, candidate) =>
+      // If request from myself, wait for other votes. If request from another
+      // candidate, reject it.
       sender() ! Vote(state.currentTerm, myId, state.votedFor, candidate == myId)
 
-      // Discovered a new term.
+    // Discovered a new term.
     case Vote(term, server, votedFor, successful) if term > state.currentTerm =>
+      assert(!successful)
       switchToFollower(term, None, Some(cb))
 
-      // Got a new vote.
+    // Got a new vote.
     case Vote(term, server, votedFor, successful) if successful && term == state.currentTerm =>
       assert(votedFor == Some(myId))
       val newVoters: Set[ServerId] = voters + server
@@ -188,18 +194,19 @@ class RaftServer extends PersistentActor with ActorLogging {
         context.become(candidate(cb, newVoters))
       }
 
-      // Stale heartbeat
+    // Stale heartbeat
     case AppendEntries(term, leader) if term < state.currentTerm =>
       sender() ! HeartbeatResponse(state.currentTerm, myId)
 
-      // Discovered a new leader.
+    // Discovered a new leader.
     case AppendEntries(term, leader) if term >= state.currentTerm =>
       log.info(s"New leader ${leader} with ${term}. Switching to follower.")
       val l = if (term == state.currentTerm) state.votedFor else None
+      // There is no need to vote since we are simply discovering existing leader.
       switchToFollower(term, l, Some(cb))
       sender() ! HeartbeatResponse(term, myId)
 
-      // TODO - put it into common receiver method.
+    // TODO - put it into common receiver method.
     case GetState =>
       log.info(s"getState: sending ${state.currentTerm}, ${state.votedFor}")
       sender() ! (state.currentTerm, state.votedFor)
@@ -213,48 +220,47 @@ class RaftServer extends PersistentActor with ActorLogging {
    * receiving any communication from follower or a leader.
    * This state should be split into learner and follower.
    */
-  def follower(cb: Cancellable): Receive = LoggingReceive.withLabel("other") {
+  def follower(cb: Cancellable): Receive = LoggingReceive.withLabel("follower") {
     case ElectionTimedout =>
       log.info(s"Failed to receive heartbeat within ${electionTimeout}.")
       switchToCandidate()
 
-      // Stale leader
+    // Stale leader
     case AppendEntries(term, leader) if term < state.currentTerm =>
       log.debug(s"stale heartbeat received for ${term} from ${leader}")
       sender() ! HeartbeatResponse(state.currentTerm, myId)
 
-      // Discovered current leader.
+    // Discovered current leader.
     case AppendEntries(term, leader) if term == state.currentTerm =>
       log.debug(s"heartbeat received for ${term} from ${leader}")
       // Restart the election timer
       switchToFollower(term, state.votedFor, Some(cb))
       sender() ! HeartbeatResponse(term, myId)
 
-      // Discovered new term and a leader
+    // Discovered new term and a leader
     case AppendEntries(term, leader) if term > state.currentTerm =>
       log.info(s"New leader ${leader} with ${term}. Switching to follower.")
       switchToFollower(term, None, Some(cb))
       sender() ! HeartbeatResponse(state.currentTerm, myId)
 
-      // Stale candidate/election.
+    // Stale candidate/election.
     case RequestVote(term, candidate) if term < state.currentTerm =>
       sender() ! Vote(state.currentTerm, myId, state.votedFor, false)
 
-
-      // Reject a vote from another candidate.
+    // Reject a vote from another candidate.
     case RequestVote(term, candidate) if term == state.currentTerm && state.votedFor.getOrElse(candidate) != candidate =>
       sender() ! Vote(state.currentTerm, myId, state.votedFor, false)
 
-      /*
-       * Be loyal.
-       */
+    /*
+     * Be loyal.
+     */
     case RequestVote(term, candidate) if term == state.currentTerm && state.votedFor.orElse(Some(candidate)) == candidate =>
       switchToFollower(term, Some(candidate), Some(cb))
       sender() ! Vote(state.currentTerm, myId, state.votedFor, true)
 
-      /*
-       * A new term begins. Vote the candidate.
-       */
+    /*
+     * A new term begins. Vote the candidate.
+     */
     case RequestVote(term, candidate) if term > state.currentTerm =>
       switchToFollower(term, Some(candidate), Some(cb))
       sender() ! Vote(state.currentTerm, myId, state.votedFor, true)

@@ -38,9 +38,9 @@ object RaftServer {
 }
 
 /**
-  * Raft is a consensus protocol for building distributed systems based on
-  * replicated state machines.
-  */
+ * Raft is a consensus protocol for building distributed systems based on
+ * replicated state machines.
+ */
 class RaftServer extends PersistentActor with ActorLogging {
 
   val raftConfig: Config = context.system.settings.config.getConfig("raft")
@@ -70,9 +70,8 @@ class RaftServer extends PersistentActor with ActorLogging {
     val s = context.self
 
     /* If the leader fails to send heartbeat within the election timeout
-     the server switches to candidate
+     * the server switches to candidate
      */
-
     val cb1 = cb.getOrElse {
       context.system.scheduler.scheduleOnce(electionTimeout) {
         log.info("Got Election timeout")

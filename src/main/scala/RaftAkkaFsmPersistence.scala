@@ -4,7 +4,7 @@ import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 
-import RaftServer1._
+import RaftFSM._
 import akka.actor._
 import akka.persistence.fsm.PersistentFSM
 import akka.persistence.fsm.PersistentFSM._
@@ -13,7 +13,7 @@ import akka.persistence._
 import com.typesafe.config._
 import scala.reflect._
 
-object RaftServer1 {
+object RaftFSM {
 
   type ServerId = Int
 
@@ -56,9 +56,10 @@ object RaftServer1 {
   object ElectionTimedout
   object Heartbeat
   object GetState
+  object IsLeader
 }
 
-class Server extends Actor with PersistentFSM[RaftState, ServerData, TermEvent] {
+class RaftFSM extends Actor with PersistentFSM[RaftState, ServerData, TermEvent] {
 
   val raftConfig: Config = context.system.settings.config.getConfig("raft")
 
@@ -78,76 +79,116 @@ class Server extends Actor with PersistentFSM[RaftState, ServerData, TermEvent] 
 
   override def domainEventClassTag: ClassTag[TermEvent] = classTag[TermEvent]
 
-  log.info(s"Initialization complete with $persistenceId and timeout of ${electionTimeout}")
+  log.info(s"Initialization complete with $persistenceId and timeout of ${electionTimeout} with quorumSize of ${quorumSize}")
 
   startWith(Follower, ServerData())
 
   when(Follower, stateTimeout = electionTimeout) {
-    case Event(StateTimeout, rs: ServerData) =>
-      goto(Candidate) applying SwitchToCandidate() andThen {
-        case d: ServerData => {
-          saveStateSnapshot
-          context.actorSelection("../*") !  RequestVote(d.currentTerm, myId)
-        }
-      }
 
-    case Event(AppendEntries(term, leader), ServerData(currentTerm, _, _)) if term < currentTerm =>
-      stay replying HeartbeatResponse(currentTerm, myId)
-
-    case Event(RequestVote(term, candidate), ServerData(currentTerm, votedFor, _)) if term < currentTerm =>
-      stay replying Vote(currentTerm, myId, votedFor, false)
+    case Event(ElectionTimedout, rs: ServerData) =>
+      log.debug("Timedout in follower state")
+      goto(Candidate) applying SwitchToCandidate()
 
     case Event(AppendEntries(term, leader), ServerData(currentTerm, votedFor, _)) => {
-      // vote applies only to a given term.
-      val newVotedFor = if (term > currentTerm) None else votedFor
-      stay applying SwitchToFollower(term, newVotedFor) replying HeartbeatResponse(term, myId)
+      goto(Follower) replying HeartbeatResponse(term, myId)
     }
 
-    case Event(RequestVote(term, candidate), ServerData(currentTerm, votedFor, _)) => {
+    case Event(RequestVote(term, candidate), ServerData(currentTerm, votedFor, _)) if term == currentTerm => {
       // vote applies only to a given term.
-      val actualVotedFor = if (term > currentTerm) Some(candidate) else votedFor.orElse(Some(candidate))
-      val successful = Some(candidate) == votedFor && term >= currentTerm
-      goto(Follower) applying SwitchToFollower(term, actualVotedFor) replying Vote(term, myId, actualVotedFor, successful)
+      val alreadyVoted = Some(candidate) == votedFor
+      val actualVotedFor = votedFor.orElse(Some(candidate))
+      val successful = actualVotedFor == Some(candidate)
+      if (!successful) {
+        stay replying Vote(term, myId, votedFor, false)
+      } else if (alreadyVoted) {
+        log.info(s"Voted for ${candidate} in term ${term}")
+        goto(Follower) replying Vote(term, myId, votedFor, true)
+      } else {
+        log.info(s"Voted for ${candidate} in term ${term}")
+        goto(Follower) applying SwitchToFollower(term, actualVotedFor) replying Vote(term, myId, actualVotedFor, true)
+      }
     }
 
   }
 
   when(Candidate) {
-    case Event(StateTimeout, rs: ServerData) =>
-      goto(Candidate) applying SwitchToCandidate() andThen {
-        case d: ServerData => {
-          saveStateSnapshot
-          context.actorSelection("../*") !  RequestVote(d.currentTerm, myId)
-        }
+    case Event(ElectionTimedout, rs: ServerData) =>
+      goto(Candidate) applying SwitchToCandidate()
+
+    case Event(RequestVote(term, candidate), ServerData(currentTerm, votedFor, _)) if term == currentTerm => {
+      val successful = myId == candidate
+      if (!successful) {
+        stay replying Vote(term, myId, votedFor, false)
+      } else {
+        log.info(s"Voted for ${candidate} in term ${term}")
+        stay replying Vote(term, myId, votedFor, true)
       }
+    }
+
+    case Event(Vote(term, serverId, vote, successful), ServerData(currentTerm, votedFor, votes)) if (successful && vote == Some(myId)) =>
+      log.info(s"Received vote from ${serverId} in term ${term}")
+      val newVotes = votes + serverId
+      if (newVotes.size == quorumSize) {
+        log.debug("Switching to leader")
+        goto(Leader) applying GotVote(serverId)
+      } else
+        stay applying GotVote(serverId)
+  }
+
+  whenUnhandled {
+    case Event(GetState, s) =>
+      stay replying s
+
+    case Event(IsLeader, s) =>
+      stay replying s"${stateName}"
 
     case Event(Vote(term, serverId, vote, successful), ServerData(currentTerm, votedFor, _)) if term < currentTerm =>
       stay
 
+    case Event(RequestVote(term, serverId), ServerData(currentTerm, votedFor, _)) if term < currentTerm =>
+      stay replying Vote(term, myId, votedFor, false)
+
+    case Event(AppendEntries(term, leader), ServerData(currentTerm, _, _)) if term < currentTerm =>
+      stay replying HeartbeatResponse(currentTerm, myId)
+
     case Event(Vote(term, serverId, vote, successful), ServerData(currentTerm, votedFor, _)) if term > currentTerm =>
       goto(Follower) applying SwitchToFollower(term, None)
 
-    case Event(Vote(term, serverId, vote, successful), ServerData(currentTerm, votedFor, _)) if (successful && vote == Some(myId)) =>
-      stay applying GotVote(serverId) andThen {
-        case d: ServerData => {
-          saveStateSnapshot
-          if (d.votes.size == quorumSize)
-            goto(Leader)
-        }
-      }
+    case Event(RequestVote(term, candidate), ServerData(currentTerm, votedFor, _)) if term > currentTerm =>
+      goto(Follower) applying SwitchToFollower(term, Some(candidate)) replying Vote(term, myId, Some(candidate), true)
+
+    case Event(AppendEntries(term, serverId), ServerData(currentTerm, _, _)) if term > currentTerm =>
+      goto(Follower) applying SwitchToFollower(term, None)
+
+    case Event(e, s) =>
+      log.warning("received unhandled request {} in state {}/{}", e, stateName, s)
+      stay
   }
 
-  when(Leader, stateTimeout = electionTimeout) {
+  when(Leader) {
     case Event(Heartbeat, state: ServerData) =>
       context.actorSelection("../*") ! AppendEntries(state.currentTerm, myId)
       stay
 
     case Event(HeartbeatResponse(term, server), state: ServerData) if term > state.currentTerm =>
-      stay applying SwitchToFollower(term, None)
+      goto(Follower) applying SwitchToFollower(term, None)
   }
 
   onTransition {
+    case _ -> Follower =>
+      cancelTimer("election")
+      setTimer("election", ElectionTimedout, electionTimeout, repeat = false)
+      log.debug(s"Switching to follower: ${nextStateData}")
+
+    case _ -> Candidate =>
+      cancelTimer("election")
+      setTimer("election", ElectionTimedout, electionTimeout, repeat = false)
+      log.debug(s"Switching to candidate: ${nextStateData}")
+      context.actorSelection("../*") !  RequestVote(nextStateData.currentTerm, myId)
+
     case _ -> Leader =>
+      cancelTimer("election")
+      log.debug(s"Elected leader: ${stateData}")
       setTimer("heartBeat", Heartbeat, heartbeatInterval, repeat = true)
 
     case Leader -> _ =>
@@ -157,7 +198,10 @@ class Server extends Actor with PersistentFSM[RaftState, ServerData, TermEvent] 
 
   override def applyEvent(event: TermEvent, stateBefore: ServerData): ServerData = {
     event match {
-      case SwitchToCandidate() => stateBefore.copy(currentTerm = stateBefore.currentTerm + 1, votedFor = Some(myId))
+      case SwitchToCandidate() => {
+        log.debug(s"Applying SwitchToCandidate")
+        stateBefore.copy(currentTerm = stateBefore.currentTerm + 1, votedFor = Some(myId), votes = stateBefore.votes + myId)
+      }
       case SwitchToFollower(newTerm, leader) => stateBefore.copy(currentTerm = newTerm, votedFor = leader)
       case GotVote(voter) => stateBefore.copy(votes = stateBefore.votes + voter)
     }

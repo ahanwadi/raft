@@ -13,7 +13,7 @@ import org.scalatest.junit.JUnitRunner
 import org.junit.runner.RunWith
 import scala.concurrent.duration._
 
-@RunWith(classOf[JUnitRunner])
+//@RunWith(classOf[JUnitRunner])
 class RaftServerSpec() extends TestKit(ActorSystem("MySpec")) with ImplicitSender
     with WordSpecLike with Matchers with BeforeAndAfterAll with Eventually {
 

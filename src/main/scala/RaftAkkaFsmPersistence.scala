@@ -12,6 +12,7 @@ import akka.event.LoggingReceive
 import akka.persistence._
 import com.typesafe.config._
 import scala.reflect._
+import java.util.concurrent.ThreadLocalRandom
 
 object RaftFSM {
 
@@ -44,7 +45,6 @@ object RaftFSM {
   case class GotVote(voter: ServerId) extends TermEvent
 
   /* RPC requests and Responses */
-
   case class AppendEntries(term: Term, leader: ServerId)
   case class HeartbeatResponse(term: Term, id: ServerId)
 
@@ -59,7 +59,7 @@ object RaftFSM {
   object IsLeader
 }
 
-class RaftFSM extends Actor with PersistentFSM[RaftState, ServerData, TermEvent] {
+class RaftFSM(val myId: ServerId) extends Actor with PersistentFSM[RaftState, ServerData, TermEvent] {
 
   val raftConfig: Config = context.system.settings.config.getConfig("raft")
 
@@ -69,11 +69,15 @@ class RaftFSM extends Actor with PersistentFSM[RaftState, ServerData, TermEvent]
 
   lazy val quorumSize = raftServers.length/2 + 1
 
-  lazy val electionTimeout: FiniteDuration = Duration.fromNanos(raftConfig.getDuration("election-timeout").toNanos())
+  private val rand: util.Random = new util.Random(compat.Platform.currentTime)
+
+  lazy val cfgElectTimeout = raftConfig.getDuration("election-timeout").toMillis()
+
+  private def electionTimeout(): FiniteDuration = {
+    Duration(ThreadLocalRandom.current().nextLong(cfgElectTimeout - 1, cfgElectTimeout * 2), MILLISECONDS)
+  }
 
   lazy val heartbeatInterval: FiniteDuration = Duration.fromNanos(raftConfig.getDuration("heartbeat-interval").toNanos())
-
-  lazy val myId: ServerId = raftConfig.getInt("myId")
 
   override def persistenceId = "raft-server-" + myId
 
@@ -86,10 +90,10 @@ class RaftFSM extends Actor with PersistentFSM[RaftState, ServerData, TermEvent]
   when(Follower, stateTimeout = electionTimeout) {
 
     case Event(ElectionTimedout, rs: ServerData) =>
-      log.debug("Timedout in follower state")
+      log.debug("Timedout in follower state ")
       goto(Candidate) applying SwitchToCandidate()
 
-    case Event(AppendEntries(term, leader), ServerData(currentTerm, votedFor, _)) => {
+    case Event(AppendEntries(term, leader), ServerData(currentTerm, _, _)) => {
       goto(Follower) replying HeartbeatResponse(term, myId)
     }
 
@@ -101,7 +105,7 @@ class RaftFSM extends Actor with PersistentFSM[RaftState, ServerData, TermEvent]
       if (!successful) {
         stay replying Vote(term, myId, votedFor, false)
       } else if (alreadyVoted) {
-        log.info(s"Voted for ${candidate} in term ${term}")
+        log.info(s"Already voted for ${candidate} in term ${term}")
         goto(Follower) replying Vote(term, myId, votedFor, true)
       } else {
         log.info(s"Voted for ${candidate} in term ${term}")
@@ -113,6 +117,7 @@ class RaftFSM extends Actor with PersistentFSM[RaftState, ServerData, TermEvent]
 
   when(Candidate) {
     case Event(ElectionTimedout, rs: ServerData) =>
+      log.debug("Election timedout")
       goto(Candidate) applying SwitchToCandidate()
 
     case Event(RequestVote(term, candidate), ServerData(currentTerm, votedFor, _)) if term == currentTerm => {
@@ -123,6 +128,10 @@ class RaftFSM extends Actor with PersistentFSM[RaftState, ServerData, TermEvent]
         log.info(s"Voted for ${candidate} in term ${term}")
         stay replying Vote(term, myId, votedFor, true)
       }
+    }
+
+    case Event(AppendEntries(term, leader), ServerData(currentTerm, _, _)) => {
+      goto(Follower) replying HeartbeatResponse(term, myId)
     }
 
     case Event(Vote(term, serverId, vote, successful), ServerData(currentTerm, votedFor, votes)) if (successful && vote == Some(myId)) =>
@@ -182,19 +191,19 @@ class RaftFSM extends Actor with PersistentFSM[RaftState, ServerData, TermEvent]
 
     case _ -> Candidate =>
       cancelTimer("election")
-      setTimer("election", ElectionTimedout, electionTimeout, repeat = false)
-      log.debug(s"Switching to candidate: ${nextStateData}")
+      val newElectionTimeout = electionTimeout()
+      setTimer("election", ElectionTimedout, newElectionTimeout, repeat = false)
+      log.debug(s"Switching to candidate: ${nextStateData} with timeout of ${newElectionTimeout}")
       context.actorSelection("../*") !  RequestVote(nextStateData.currentTerm, myId)
 
     case _ -> Leader =>
       cancelTimer("election")
-      log.debug(s"Elected leader: ${stateData}")
+      log.debug(s"Elected leader: ${nextStateData}")
       setTimer("heartBeat", Heartbeat, heartbeatInterval, repeat = true)
 
     case Leader -> _ =>
       cancelTimer("heartBeat")
   }
-
 
   override def applyEvent(event: TermEvent, stateBefore: ServerData): ServerData = {
     event match {
@@ -202,7 +211,7 @@ class RaftFSM extends Actor with PersistentFSM[RaftState, ServerData, TermEvent]
         log.debug(s"Applying SwitchToCandidate")
         stateBefore.copy(currentTerm = stateBefore.currentTerm + 1, votedFor = Some(myId), votes = stateBefore.votes + myId)
       }
-      case SwitchToFollower(newTerm, leader) => stateBefore.copy(currentTerm = newTerm, votedFor = leader)
+      case SwitchToFollower(newTerm, leader) => stateBefore.copy(currentTerm = newTerm, votedFor = leader, votes = Set())
       case GotVote(voter) => stateBefore.copy(votes = stateBefore.votes + voter)
     }
   }

@@ -1,4 +1,7 @@
 /.ensime
 /.gradle/
+/.idea/
+/logs/
+/out/
 /build/
 /target/

@@ -1,21 +1,14 @@
 package raft
 
-import org.scalatest._
-import akka.actor.ActorSystem
-import akka.actor.Actor
-import akka.actor.Props
-import akka.testkit.{ TestActors, TestKit, ImplicitSender }
-import org.scalatest.WordSpecLike
+import akka.actor.{ActorSystem, Props}
+import akka.testkit.{ImplicitSender, TestKit}
+import org.scalatest.{BeforeAndAfterAll, Matchers, WordSpecLike}
 import org.scalatest.concurrent.Eventually
-import org.scalatest.Matchers
-import org.scalatest.BeforeAndAfterAll
-import org.scalatest.junit.JUnitRunner
-import org.junit.runner.RunWith
-import scala.concurrent.duration._
 import com.typesafe.config._
-import scala.collection.JavaConverters._
 
-@RunWith(classOf[JUnitRunner])
+import scala.collection.JavaConverters._
+import scala.concurrent.duration._
+
 class RaftFSMTest() extends TestKit(ActorSystem("MySpec")) with ImplicitSender
     with WordSpecLike with Matchers with BeforeAndAfterAll with Eventually {
 

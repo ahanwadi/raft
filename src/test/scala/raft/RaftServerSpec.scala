@@ -1,19 +1,14 @@
 package raft
 
-import org.scalatest._
 import akka.actor.ActorSystem
-import akka.actor.Actor
 import akka.actor.Props
 import akka.testkit.{ TestActors, TestKit, ImplicitSender }
 import org.scalatest.WordSpecLike
 import org.scalatest.concurrent.Eventually
 import org.scalatest.Matchers
 import org.scalatest.BeforeAndAfterAll
-import org.scalatest.junit.JUnitRunner
-import org.junit.runner.RunWith
 import scala.concurrent.duration._
 
-//@RunWith(classOf[JUnitRunner])
 class RaftServerSpec() extends TestKit(ActorSystem("MySpec")) with ImplicitSender
     with WordSpecLike with Matchers with BeforeAndAfterAll with Eventually {
 

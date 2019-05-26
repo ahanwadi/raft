@@ -1,4 +1,6 @@
-apply plugin: 'scala'
+plugins {
+    id 'scala'
+}
 
 ext.akka_version = '2.5.23'
 
@@ -8,15 +10,14 @@ repositories {
 }
  
 dependencies {
-  compile group: 'com.typesafe.akka', name: 'akka-actor_2.12', version: akka_version
-  compile group: 'com.typesafe.akka', name: 'akka-slf4j_2.12', version: akka_version
-  compile group: 'ch.qos.logback', name: 'logback-classic', version: '1.2.3'
-  testCompile group: 'org.scalatest', name: 'scalatest_2.12', version: '3.0.1'
-  testCompile group: 'com.typesafe.akka', name: 'akka-testkit_2.12', version: akka_version
- // testCompile group: 'junit', name: 'junit', version: '4.12'
-//  testCompile group: 'com.github.dnvriend', name: 'akka-persistence-inmemory_2.12', version: '2.5.15.1'
-  compile group: 'com.typesafe.akka', name: 'akka-persistence_2.12', version: akka_version
+  implementation group: 'com.typesafe.akka', name: 'akka-actor_2.12', version: akka_version
+  implementation group: 'com.typesafe.akka', name: 'akka-slf4j_2.12', version: akka_version
+  implementation group: 'ch.qos.logback', name: 'logback-classic', version: '1.2.3'
+  testImplementation group: 'org.scalatest', name: 'scalatest_2.12', version: '3.0.1'
+  testImplementation group: 'com.typesafe.akka', name: 'akka-testkit_2.12', version: akka_version
+  testCompile group: 'junit', name: 'junit', version: '4.12'
+  implementation group: 'com.typesafe.akka', name: 'akka-persistence_2.12', version: akka_version
 //  compile group: 'org.iq80.leveldb', name: 'leveldb', version: '0.7'
-  compile group: 'org.fusesource.leveldbjni', name: 'leveldbjni-all', version: '1.8'
-  compile group: 'org.scala-lang', name: 'scala-library', version: '2.12.8'
+  implementation group: 'org.fusesource.leveldbjni', name: 'leveldbjni-all', version: '1.8'
+  implementation group: 'org.scala-lang', name: 'scala-library', version: '2.12.8'
 }

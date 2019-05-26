@@ -8,7 +8,10 @@ import com.typesafe.config._
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
+import org.junit.runner.RunWith
+import org.scalatest.junit.JUnitRunner
 
+@RunWith(classOf[JUnitRunner])
 class RaftFSMTest() extends TestKit(ActorSystem("MySpec")) with ImplicitSender
     with WordSpecLike with Matchers with BeforeAndAfterAll with Eventually {
 

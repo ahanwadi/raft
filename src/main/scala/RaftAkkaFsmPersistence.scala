@@ -1,18 +1,16 @@
 package raft
 
-import scala.collection.JavaConverters._
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.duration._
+import java.util.concurrent.ThreadLocalRandom
 
-import RaftFSM._
 import akka.actor._
 import akka.persistence.fsm.PersistentFSM
 import akka.persistence.fsm.PersistentFSM._
-import akka.event.LoggingReceive
-import akka.persistence._
 import com.typesafe.config._
+import raft.RaftFSM._
+
+import scala.collection.JavaConverters._
+import scala.concurrent.duration._
 import scala.reflect._
-import java.util.concurrent.ThreadLocalRandom
 
 object RaftFSM {
 

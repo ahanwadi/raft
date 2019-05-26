@@ -1,12 +1,10 @@
 package raft
 
-import akka.actor.ActorSystem
-import akka.actor.Props
-import akka.testkit.{ TestActors, TestKit, ImplicitSender }
-import org.scalatest.WordSpecLike
+import akka.actor.{ActorSystem, Props}
+import akka.testkit.{ImplicitSender, TestKit}
+import org.scalatest.{BeforeAndAfterAll, Matchers, WordSpecLike}
 import org.scalatest.concurrent.Eventually
-import org.scalatest.Matchers
-import org.scalatest.BeforeAndAfterAll
+
 import scala.concurrent.duration._
 
 class RaftServerSpec() extends TestKit(ActorSystem("MySpec")) with ImplicitSender

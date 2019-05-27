@@ -38,5 +38,25 @@ class RaftTest extends ScalaTestWithActorTestKit() with WordSpecLike {
 
     }
   }
+
+  "Raft Server" must {
+    "transition to candidate with next term after no votes are received within heartbeat timeout" in {
+      val myId = 10
+      val r = spawn(raft.Raft(Some(myId)))
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(myId, 0, "Follower"))
+
+      manualTime.timePasses(electionTimeout)
+
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(id = myId, term = 1, mode = "Candidate"))
+
+      manualTime.timePasses(electionTimeout)
+
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(id = myId, term = 2, mode = "Candidate"))
+
+    }
+  }
 }
 

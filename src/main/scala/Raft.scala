@@ -115,9 +115,9 @@ object Raft {
     timers.startSingleTimer(HeartbeatTimeout, HeartbeatTimeout, electionTimeout)
   }
 
-  def apply(): Behavior[RaftCmd] = Behaviors.setup { context: ActorContext[RaftCmd] =>
+  def apply(id: Option[Int] = None): Behavior[RaftCmd] = Behaviors.setup { context: ActorContext[RaftCmd] =>
     val raftConfig: Config = context.system.settings.config.getConfig("raft")
-    val myId: Int = raftConfig.getInt("myId")
+    val myId: Int = id.getOrElse(raftConfig.getInt("myId"))
     val persistenceId = PersistenceId(s"raft-server-typed-$myId")
 
     Behaviors.withTimers { timers: TimerScheduler[RaftCmd] =>

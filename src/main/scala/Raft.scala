@@ -42,7 +42,7 @@ object Raft {
     }
   }
 
-  case class Follower(myId: Int, currentTerm: Int = 0, votedFor: Option[ServerId] = None) extends State {
+  final case class Follower(myId: Int, currentTerm: Int = 0, votedFor: Option[ServerId] = None) extends State {
 
     def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]): CommandHandler[RaftCmd, Event, State] = CommandHandler.command { case cmd =>
 
@@ -64,7 +64,7 @@ object Raft {
     override def getMode: String = "Follower"
   }
 
-  case class Candidate(myId: Int, currentTerm: Int = 0, votedFor: Option[Int]) extends State {
+  final case class Candidate(myId: Int, currentTerm: Int = 0, votedFor: Option[Int]) extends State {
 
     override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) = CommandHandler.command { cmd =>
       cmd match {
@@ -77,7 +77,7 @@ object Raft {
     override def getMode: String = "Candidate"
   }
 
-  case class Leader(myId: Int, currentTerm: Int) extends State {
+  final case class Leader(myId: Int, currentTerm: Int) extends State {
 
     override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) = CommandHandler.command { cmd =>
       cmd match {
@@ -93,20 +93,20 @@ object Raft {
     def term: Int
   }
 
-  case class NewTerm(term: Int, votedFor: Option[Int] = None) extends Event
+  final case class NewTerm(term: Int, votedFor: Option[Int] = None) extends Event
 
 
   sealed trait RaftCmd
-  case class RequestVote(term: Int, candidate: ServerId, from: ActorRef[RaftCmd]) extends RaftCmd with Term
-  case class Vote(term: Int, voter: ServerId, votedFor: Option[ServerId], result: Boolean) extends RaftCmd with Term
-  case class AppendEntries(term: Int, leader: ServerId, from: ActorRef[RaftCmd]) extends RaftCmd with Term
-  case class HeartbeatResponse(term: Int, id: ServerId) extends RaftCmd with Term
-  case object HeartbeatTimeout extends RaftCmd
+  final case class RequestVote(term: Int, candidate: ServerId, from: ActorRef[RaftCmd]) extends RaftCmd with Term
+  final case class Vote(term: Int, voter: ServerId, votedFor: Option[ServerId], result: Boolean) extends RaftCmd with Term
+  final case class AppendEntries(term: Int, leader: ServerId, from: ActorRef[RaftCmd]) extends RaftCmd with Term
+  final case class HeartbeatResponse(term: Int, id: ServerId) extends RaftCmd with Term
+  final case object HeartbeatTimeout extends RaftCmd
 
   sealed trait ClientProto extends RaftCmd
-  case class GetState(sender: ActorRef[ClientProto]) extends ClientProto
+  final case class GetState(sender: ActorRef[ClientProto]) extends ClientProto
 
-  case class CurrentState(id: Int, term: Int, mode: String) extends ClientProto
+  final case class CurrentState(id: Int, term: Int, mode: String) extends ClientProto
 
   def startHeartbeatTimer(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) = {
     val raftConfig: Config = context.system.settings.config.getConfig("raft")
@@ -155,6 +155,5 @@ object Raft {
       case NewTerm(term, _) => Follower(state.myId, term)
     }
   }
-
 
 }

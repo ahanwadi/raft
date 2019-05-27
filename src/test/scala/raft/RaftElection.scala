@@ -9,7 +9,7 @@ import org.scalatest.junit.JUnitRunner
 import scala.concurrent.duration.{Duration, FiniteDuration}
 
 @RunWith(classOf[JUnitRunner])
-class RaftTest extends ScalaTestWithActorTestKit() with WordSpecLike {
+class RaftElection extends ScalaTestWithActorTestKit() with WordSpecLike {
 
   lazy val probe = createTestProbe[Raft.ClientProto]()
   val manualTime: ManualTime = ManualTime()

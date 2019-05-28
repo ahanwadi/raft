@@ -35,7 +35,15 @@ object Raft {
     def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]): CommandHandler[RaftCmd, Raft.Event, Raft.State]
 
     def defhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) : PartialFunction[RaftCmd, Effect[Raft.Event, Raft.State]] = {
-      case e: Term if e.term > currentTerm => Effect.persist(NewTerm(e.term)).thenRun { state =>
+      case cmd @ RequestVote(term, candidate, _) if term > currentTerm =>
+        context.log.info(s"Voting for $candidate in $term")
+        Effect.persist(NewTerm(term, Some(candidate))).thenRun { state: Raft.State =>
+          state.enterMode(timers, context)
+        }.thenReply(cmd) { _ =>
+          Vote(term, myId, Some(candidate), true)
+        }
+      case e: Term if e.term > currentTerm =>
+        Effect.persist(NewTerm(e.term)).thenRun { state =>
         state.enterMode(timers, context)
       }
       case e: Term if e.term < currentTerm => Effect.none
@@ -50,10 +58,15 @@ object Raft {
     def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]): CommandHandler[RaftCmd, Event, State] = CommandHandler.command { case cmd =>
 
       cmd match {
-        case AppendEntries(_, _, _) =>
+        case AppendEntries(term, _, _) if term == currentTerm =>
           /* On heartbeat restart the timer, only if heartbeat is for the current term */
-          /* TODO: Do we need to verify if heartbeat is from leader of the current term */
+          /* TODO: Do we need to verify if heartbeat is from leader of the current term? */
           Effect.none.thenRun { state =>
+            state.enterMode(timers, context)
+          }
+        case AppendEntries(term, _, _) if term > currentTerm =>
+          // We just got a heartbeat from the new leader, we haven't voted.
+          Effect.persist(NewTerm(term, None)).thenRun { state =>
             state.enterMode(timers, context)
           }
         case HeartbeatTimeout =>

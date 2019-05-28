@@ -1,147 +1,194 @@
 package raft
 
-import akka.actor.testkit.typed.scaladsl.{ManualTime, ScalaTestWithActorTestKit}
+import akka.actor.testkit.typed.scaladsl.{ManualTime, ScalaTestWithActorTestKit, TestProbe}
+import akka.actor.typed.scaladsl.Behaviors
+import akka.persistence.typed.ExpectingReply
 import com.typesafe.config.Config
 import org.junit.runner.RunWith
-import org.scalatest.WordSpecLike
+import org.scalatest.{BeforeAndAfter, BeforeAndAfterEach, Informing, WordSpecLike}
 import org.scalatest.junit.JUnitRunner
+import raft.Raft.{RaftReply, RequestVote, Term}
 
 import scala.concurrent.duration.{Duration, FiniteDuration}
 import scala.util.Random
 
 @RunWith(classOf[JUnitRunner])
-class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike {
+class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike with BeforeAndAfter with Informing {
 
   "Raft Server" must {
-    lazy val probe = createTestProbe[Raft.ClientProto]()
-    val manualTime: ManualTime = ManualTime()
 
+    var probe: TestProbe[Raft.ClientProto] = null
+    val manualTime: ManualTime = ManualTime()
     val raftConfig: Config = system.settings.config.getConfig("raft")
     val electionTimeout: FiniteDuration = Duration.fromNanos(raftConfig.getDuration("election-timeout").toNanos())
+    var myId: Int = 0
+    implicit var clusterConfig: Cluster = null
+
+    before {
+      probe = createTestProbe[Raft.ClientProto]()
+
+      myId = (new Random()).nextInt()
+
+      clusterConfig = Cluster(myId)
+    }
 
     "start in a follower mode" in {
       val r = spawn(raft.Raft(), "test")
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(0, 0, "Follower"))
+      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
     }
 
     "transition to candidate after heartbeat timeout" in {
       val r = spawn(raft.Raft())
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(0, 0, "Follower"))
+      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
       manualTime.timePasses(electionTimeout)
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(id = 0, term = 1, mode = "Candidate"))
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Candidate"))
 
     }
 
     "transition to candidate with next term after no votes are received within heartbeat timeout" in {
-      val myId = 10
-      val r = spawn(raft.Raft(Some(myId)))
+      val r = spawn(raft.Raft())
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(myId, 0, "Follower"))
+      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
       manualTime.timePasses(electionTimeout)
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(id = myId, term = 1, mode = "Candidate"))
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Candidate"))
 
       manualTime.timePasses(electionTimeout)
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(id = myId, term = 2, mode = "Candidate"))
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 2, mode = "Candidate"))
 
     }
 
     "should vote if not voted when in follower mode" in {
-      val myId = (new Random()).nextInt()
-      val r = spawn(raft.Raft(Some(myId)))
+      val r = spawn(raft.Raft())
       val probe = createTestProbe[Raft.RaftCmd]()
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(myId, 0, "Follower"))
+      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
       r ! Raft.RequestVote(0, 0, probe.ref)
-      probe.expectMessage(Raft.RaftReply(0, myId, Some(0), true))
+      probe.expectMessage(Raft.RaftReply(0, clusterConfig.myId, Some(0), true))
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(id = myId, term = 0, mode = "Follower"))
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 0, mode = "Follower"))
     }
 
     "reject RequestVote as a candidate in the same term" in {
-      val myId = (new Random()).nextInt()
-      val r = spawn(raft.Raft(Some(myId)))
+      val r = spawn(raft.Raft())
       val probe = createTestProbe[Raft.RaftCmd]()
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(myId, 0, "Follower"))
+      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
       manualTime.timePasses(electionTimeout)
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(id = myId, term = 1, mode = "Candidate"))
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Candidate"))
 
       r ! Raft.RequestVote(term = 1, candidate = 0, replyTo = probe.ref)
-      probe.expectMessage(Raft.RaftReply(term = 1, voter = myId, votedFor = Some(myId), result = false))
+      probe.expectMessage(Raft.RaftReply(term = 1, voter = clusterConfig.myId, votedFor = Some(clusterConfig.myId), result = false))
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(id = myId, term = 1, mode = "Candidate"))
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Candidate"))
 
     }
 
     "should not vote if already voted in the current term" in {
-      val myId = (new Random()).nextInt()
-      val r = spawn(raft.Raft(Some(myId)))
+      val r = spawn(raft.Raft())
       val probe = createTestProbe[Raft.RaftCmd]()
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(myId, 0, "Follower"))
+      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
       r ! Raft.RequestVote(term = 0, candidate = 0, replyTo = probe.ref)
-      probe.expectMessage(Raft.RaftReply(term = 0, voter = myId, votedFor = Some(0), result = true))
+      probe.expectMessage(Raft.RaftReply(term = 0, voter = clusterConfig.myId, votedFor = Some(0), result = true))
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(id = myId, term = 0, mode = "Follower"))
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 0, mode = "Follower"))
 
       r ! Raft.RequestVote(term = 0, candidate = 1, replyTo = probe.ref)
-      probe.expectMessage(Raft.RaftReply(term = 0, voter = myId, votedFor = Some(0), result = false))
+      probe.expectMessage(Raft.RaftReply(term = 0, voter = clusterConfig.myId, votedFor = Some(0), result = false))
     }
 
     "should accept newer leader" in {
-      val myId = (new Random()).nextInt()
-      val r = spawn(raft.Raft(Some(myId)))
+      val r = spawn(raft.Raft())
       val probe = createTestProbe[Raft.RaftCmd]()
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(myId, 0, "Follower"))
+      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
       r ! Raft.AppendEntries(term = 1, leader = 1, replyTo = probe.ref)
-      probe.expectMessage(Raft.RaftReply(term = 1, voter = myId, votedFor = None, result = true))
+      probe.expectMessage(Raft.RaftReply(term = 1, voter = clusterConfig.myId, votedFor = None, result = true))
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(id = myId, term = 1, mode = "Follower"))
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Follower"))
     }
 
 
     "should reject requests with stale terms" in {
-      val myId = (new Random()).nextInt()
-      val r = spawn(raft.Raft(Some(myId)))
+      val r = spawn(raft.Raft())
       val probe = createTestProbe[Raft.RaftCmd]()
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(myId, 0, "Follower"))
+      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
       manualTime.timePasses(electionTimeout)
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(id = myId, term = 1, mode = "Candidate"))
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Candidate"))
 
       r ! Raft.AppendEntries(term = 0, leader = 1, replyTo = probe.ref)
-      probe.expectMessage(Raft.RaftReply(term = 1, voter = myId, votedFor = None, result = false))
+      probe.expectMessage(Raft.RaftReply(term = 1, voter = clusterConfig.myId, votedFor = None, result = false))
 
+    }
+
+    "should get elected as leader" in {
+
+      implicit val clusterConfig: Cluster = new Cluster {
+
+        def otherMembers = Set(20, 30)
+        override def members: Set[Int] = otherMembers + myId
+
+        override def memberRefs =
+          otherMembers.map { member =>
+            (member, spawn(behavior = Behaviors.receive[Raft.RaftCmd] { (_, cmd) =>
+              cmd match {
+                case RequestVote(term, candidate, replyTo) =>
+                  replyTo ! RaftReply(term, member, Some(candidate), true)
+                  Behaviors.same
+                case req: (Term with ExpectingReply[RaftReply]) =>
+                  req.replyTo ! RaftReply(0, member, None, true)
+                  Behaviors.same
+              }
+            }))
+          }.toMap
+
+        override val myId: Int = (new Random()).nextInt()
+      }
+
+      val r = spawn(raft.Raft())
+
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
+
+      manualTime.timePasses(electionTimeout)
+
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Candidate"))
+
+      manualTime.timePasses(electionTimeout)
+
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Leader"))
     }
 
   }

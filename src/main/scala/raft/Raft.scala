@@ -22,31 +22,34 @@ object Raft {
 
   type Index = Int
 
+
   // The persistent state stored by all servers.
   sealed trait State {
+    def eventHandler(clusterConfig: Cluster, evt: Event): State = this
+
     def myId: Int
     def currentTerm: Int
 
     def getMode: String
 
-    def enterMode(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) = {
+    def enterMode(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = {
       startHeartbeatTimer(timers, context)
     }
 
-    def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]): CommandHandler[RaftCmd, Raft.Event, Raft.State]
+    def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster): CommandHandler[RaftCmd, Raft.Event, Raft.State]
 
-    def defhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) : PartialFunction[RaftCmd, Effect[Raft.Event, Raft.State]] = {
+    def defhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) : PartialFunction[RaftCmd, Effect[Raft.Event, Raft.State]] = {
       case cmd @ RequestVote(term, candidate, _) if term > currentTerm =>
         context.log.info(s"Voting for $candidate in $term")
         Effect.persist(NewTerm(term, Some(candidate))).thenRun { state: Raft.State =>
-          state.enterMode(timers, context)
+          state.enterMode(timers, context, clusterConfig)
         }.thenReply(cmd) { _ =>
           RaftReply(term, myId, Some(candidate), true)
         }
       case cmd @ AppendEntries(term, leader, _) if term > currentTerm =>
         context.log.info(s"Got heartbeat from new leader $leader in $term")
         Effect.persist(NewTerm(term, None)).thenRun { state: Raft.State =>
-          state.enterMode(timers, context)
+          state.enterMode(timers, context, clusterConfig)
         }.thenReply(cmd) { _ =>
           RaftReply(term, myId, None, true)
         }
@@ -54,7 +57,7 @@ object Raft {
         Effect.reply(cmd)(RaftReply(currentTerm, myId, None, false))
       case e: Term if e.term > currentTerm =>
         Effect.persist(NewTerm(e.term)).thenRun { state =>
-          state.enterMode(timers, context)
+          state.enterMode(timers, context, clusterConfig)
         }
       case e: Term if e.term < currentTerm => Effect.none
       case c: GetState =>
@@ -65,7 +68,7 @@ object Raft {
 
   final case class Follower(myId: Int, currentTerm: Int = 0, votedFor: Option[Int] = None) extends State {
 
-    def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]): CommandHandler[RaftCmd, Event, State] = CommandHandler.command { case cmd =>
+    def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster): CommandHandler[RaftCmd, Event, State] = CommandHandler.command { case cmd =>
 
       cmd match {
         case cmd @ AppendEntries(term, leader, _) if term == currentTerm =>
@@ -73,24 +76,24 @@ object Raft {
           /* TODO: Do we need to verify if heartbeat is from leader of the current term? */
           context.log.info(s"Got heartbeat from leader: $leader for $term")
           Effect.none.thenRun { state: State =>
-            state.enterMode(timers, context)
+            state.enterMode(timers, context, clusterConfig)
           }.thenReply(cmd) { _ =>
             RaftReply(term, myId, votedFor, true)
           }
         case HeartbeatTimeout =>
           Effect.persist(NewTerm(currentTerm + 1, Some(myId))).thenRun { state =>
-            state.enterMode(timers, context)
+            state.enterMode(timers, context, clusterConfig)
           }
         case cmd @ RequestVote(term, candidate, _) if votedFor.isEmpty =>
           context.log.info(s"Voting for $candidate in $term")
           Effect.persist(NewTerm(term, Some(candidate))).thenRun { state: Raft.State =>
-            state.enterMode(timers, context)
+            state.enterMode(timers, context, clusterConfig)
           }.thenReply(cmd) { _ =>
             RaftReply(term, myId, Some(candidate), true)
           }
         case cmd @ RequestVote(term, _, _) =>
           Effect.none.thenRun { state: Raft.State =>
-            state.enterMode(timers, context)
+            state.enterMode(timers, context, clusterConfig)
           }.thenReply(cmd) { _ =>
             RaftReply(term, myId, votedFor, false)
           }
@@ -101,9 +104,30 @@ object Raft {
     override def getMode: String = "Follower"
   }
 
-  final case class Candidate(myId: Int, currentTerm: Int = 0, votedFor: Option[Int]) extends State {
+  final case class Candidate(myId: Int, currentTerm: Int = 0, votedFor: Option[Int], votes: Set[Int] = Set()) extends State {
 
-    override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) = CommandHandler.command { cmd =>
+    override def enterMode(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = {
+      clusterConfig.memberRefs.foreach { member =>
+        member._2 ! RequestVote(currentTerm, myId, context.self)
+      }
+      super.enterMode(timers, context, clusterConfig)
+    }
+
+    override def eventHandler(clusterConfig: Cluster, evt: Event): State = {
+      evt match {
+        case GotVote(term, voter) if term == currentTerm && clusterConfig.members.contains(voter) => {
+          val voters = votes + voter
+          if (voters.size >= clusterConfig.quorumSize) {
+            Leader(myId, currentTerm)
+          } else {
+            copy(votes = voters)
+          }
+        }
+        case _ => super.eventHandler(clusterConfig, evt)
+      }
+    }
+
+    override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = CommandHandler.command { cmd =>
       cmd match {
         case cmd @ AppendEntries(term, leader, _) =>
           /* Transition to follower. What if term is same currentTerm? and
@@ -114,27 +138,32 @@ object Raft {
            */
           context.log.info(s"Got heartbeat from leader: $leader for $term")
           Effect.persist(NewTerm(term, None)).thenRun { state: State =>
-            state.enterMode(timers, context)
+            state.enterMode(timers, context, clusterConfig)
           }.thenReply(cmd) { _ =>
             RaftReply(term, myId, votedFor, true)
           }
         case cmd @ RequestVote(term, candidate, _) if term > currentTerm =>
           context.log.info(s"Got request vote with higher term - $term than $currentTerm")
           Effect.persist(NewTerm(term, Some(candidate))).thenRun { state: Raft.State =>
-            state.enterMode(timers, context)
+            state.enterMode(timers, context, clusterConfig)
           }.thenReply(cmd) { _ =>
             RaftReply(term, myId, Some(candidate), true)
           }
         case cmd @ RequestVote(term, _, _) =>
           Effect.none.thenRun { state: Raft.State =>
-            state.enterMode(timers, context)
+            state.enterMode(timers, context, clusterConfig)
           }.thenReply(cmd) { _ =>
             context.log.info(s"Rejecting vote in the same term - $term ($currentTerm) as a candidate")
             RaftReply(term, myId, votedFor, false)
           }
+        case RaftReply(term, voter, votedFor, result) if term == currentTerm && votedFor == Some(myId) && result =>
+          context.log.info(s"Got vote from $voter")
+          Effect.persist(GotVote(term, voter)).thenRun { state =>
+            state.enterMode(timers, context, clusterConfig)
+          }
         case HeartbeatTimeout =>
           Effect.persist(NewTerm(currentTerm + 1, Some(myId))).thenRun { state =>
-            state.enterMode(timers, context)
+            state.enterMode(timers, context, clusterConfig)
           }
         case _ => Effect.none
       }
@@ -145,7 +174,7 @@ object Raft {
 
   final case class Leader(myId: Int, currentTerm: Int) extends State {
 
-    override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) = CommandHandler.command { cmd =>
+    override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = CommandHandler.command { cmd =>
       cmd match {
         case HeartbeatTimeout => Effect.none // Send heartbeat
         case _ => Effect.none
@@ -160,6 +189,7 @@ object Raft {
   }
 
   final case class NewTerm(term: Int, votedFor: Option[Int] = None) extends Event
+  final case class GotVote(term: Int, voters: Int) extends Event
 
 
   sealed trait RaftCmd
@@ -180,37 +210,36 @@ object Raft {
     timers.startSingleTimer(HeartbeatTimeout, HeartbeatTimeout, electionTimeout)
   }
 
-  def apply(id: Option[Int] = None): Behavior[RaftCmd] = Behaviors.setup { context: ActorContext[RaftCmd] =>
-    val raftConfig: Config = context.system.settings.config.getConfig("raft")
-    val myId: Int = id.getOrElse(raftConfig.getInt("myId"))
+  def apply(id: Option[Int] = None)(implicit clusterConfig: Cluster): Behavior[RaftCmd] = Behaviors.setup { context: ActorContext[RaftCmd] =>
+//    val raftConfig: Config = context.system.settings.config.getConfig("raft")
+    val myId: Int = id.getOrElse(clusterConfig.myId) // raftConfig.getInt("myId"))
     val persistenceId = PersistenceId(s"raft-server-typed-$myId")
 
     Behaviors.withTimers { timers: TimerScheduler[RaftCmd] =>
       EventSourcedBehavior[RaftCmd, Event, State](
         persistenceId = persistenceId,
         emptyState = Follower(myId),
-        commandHandler = dispatcher(timers, context),
-        eventHandler = eventHandler
+        commandHandler = dispatcher(timers, context, clusterConfig),
+        eventHandler = eventHandler(clusterConfig)
       ).receiveSignal {
-          case (state, RecoveryCompleted) => state.enterMode(timers, context)
+          case (state, RecoveryCompleted) => state.enterMode(timers, context, clusterConfig)
         }
-
     }
   }
 
-  def dispatcher(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) : (Raft.State, RaftCmd) => Effect[Raft.Event, Raft.State] = {
+  def dispatcher(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) : (Raft.State, RaftCmd) => Effect[Raft.Event, Raft.State] = {
     (state: Raft.State, cmd: RaftCmd) => {
       def secondhandler: PartialFunction[RaftCmd, Effect[Raft.Event, Raft.State]] = { case c =>
-        state.commandhandler(timers, context)(state, c)
+        state.commandhandler(timers, context, clusterConfig)(state, c)
       }
       val y: Effect[Event, State] =
-        state.defhandler(timers, context = context).orElse(secondhandler)(cmd)
+        state.defhandler(timers, context = context, clusterConfig).orElse(secondhandler)(cmd)
       y
     }
   }
 
 
-  def eventHandler: (Raft.State, Raft.Event) => Raft.State = (state: State, evt: Event) => {
+  def eventHandler(clusterConfig: Cluster): (Raft.State, Raft.Event) => Raft.State = (state: State, evt: Event) => {
     evt match {
         /*
          * When votedFor == empty or votedFor != myId became follower
@@ -218,6 +247,7 @@ object Raft {
          */
       case NewTerm(term, votedFor) if votedFor == Some(state.myId) => Candidate(state.myId, term, votedFor)
       case NewTerm(term, votedFor) => Follower(state.myId, term, votedFor)
+      case GotVote(_, _) => state.eventHandler(clusterConfig, evt)
     }
   }
 

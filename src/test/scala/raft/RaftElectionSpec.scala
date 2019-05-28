@@ -125,6 +125,25 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike {
       probe.expectMessage(Raft.CurrentState(id = myId, term = 1, mode = "Follower"))
     }
 
+
+    "should reject requests with stale terms" in {
+      val myId = (new Random()).nextInt()
+      val r = spawn(raft.Raft(Some(myId)))
+      val probe = createTestProbe[Raft.RaftCmd]()
+
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(myId, 0, "Follower"))
+
+      manualTime.timePasses(electionTimeout)
+
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(id = myId, term = 1, mode = "Candidate"))
+
+      r ! Raft.AppendEntries(term = 0, leader = 1, replyTo = probe.ref)
+      probe.expectMessage(Raft.RaftReply(term = 1, voter = myId, votedFor = None, result = false))
+
+    }
+
   }
 }
 

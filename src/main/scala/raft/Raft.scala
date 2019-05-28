@@ -15,6 +15,7 @@ object Raft {
     def myId: Int
   }
 
+  /* Current Election Term */
   sealed trait Term {
     def term: Int
   }

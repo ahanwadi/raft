@@ -107,6 +107,7 @@ object Raft {
   final case class Candidate(myId: Int, currentTerm: Int = 0, votedFor: Option[Int], votes: Set[Int] = Set()) extends State {
 
     override def enterMode(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = {
+      context.log.info(s"Requesting votes in term $currentTerm")
       clusterConfig.memberRefs.foreach { member =>
         member._2 ! RequestVote(currentTerm, myId, context.self)
       }
@@ -162,6 +163,7 @@ object Raft {
             state.enterMode(timers, context, clusterConfig)
           }
         case HeartbeatTimeout =>
+          context.log.info(s"Initiating new election with $currentTerm + 1")
           Effect.persist(NewTerm(currentTerm + 1, Some(myId))).thenRun { state =>
             state.enterMode(timers, context, clusterConfig)
           }
@@ -173,6 +175,13 @@ object Raft {
   }
 
   final case class Leader(myId: Int, currentTerm: Int) extends State {
+
+    override def enterMode(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = {
+      clusterConfig.memberRefs.foreach { member =>
+        member._2 ! AppendEntries(currentTerm, myId, context.self)
+      }
+      super.enterMode(timers, context, clusterConfig)
+    }
 
     override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = CommandHandler.command { cmd =>
       cmd match {
@@ -200,7 +209,6 @@ object Raft {
 
   sealed trait ClientProto extends RaftCmd
   final case class GetState(sender: ActorRef[ClientProto]) extends ClientProto
-
   final case class CurrentState(id: Int, term: Int, mode: String) extends ClientProto
 
   def startHeartbeatTimer(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) = {

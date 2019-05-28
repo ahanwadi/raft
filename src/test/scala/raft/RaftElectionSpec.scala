@@ -8,7 +8,7 @@ import org.junit.runner.RunWith
 import org.scalatest.junit.JUnitRunner
 import org.scalatest.{BeforeAndAfter, Informing, WordSpecLike}
 import org.scalatest.time.SpanSugar._
-import raft.Raft.{RaftReply, RequestVote, Term}
+import raft.Raft.{AppendEntries, RaftCmd, RaftReply, RequestVote, Term}
 
 import scala.concurrent.duration.{Duration, FiniteDuration}
 import scala.util.Random
@@ -154,9 +154,55 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike wit
 
     "should get elected as leader unanimously" in {
 
+      val monitorProbe = testKit.createTestProbe[RaftCmd]()
+
       implicit val clusterConfig: Cluster = new Cluster {
 
         def otherMembers = Set(20, 30)
+        override def members: Set[Int] = otherMembers + myId
+
+        override def memberRefs =
+          otherMembers.map { member =>
+            (member, spawn(behavior = Behaviors.monitor(monitor = monitorProbe.ref,
+              behavior = Behaviors.receive[Raft.RaftCmd] { (_, cmd) =>
+              cmd match {
+                case RequestVote(term, candidate, replyTo) =>
+                  replyTo ! RaftReply(term, member, Some(candidate), true)
+                  Behaviors.same
+                case req: (Term with ExpectingReply[RaftReply]) =>
+                  req.replyTo ! RaftReply(0, member, None, true)
+                  Behaviors.same
+              }
+            })))
+          }.toMap
+
+        override val myId: Int = (new Random()).nextInt()
+      }
+
+      val r = spawn(raft.Raft())
+
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
+
+      manualTime.timePasses(electionTimeout)
+      eventually (timeout(scaled(5 seconds)), interval(scaled(5 millis))) {
+        r ! Raft.GetState(probe.ref)
+        probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Leader"))
+      }
+
+      eventually (timeout(scaled(5 seconds)), interval(scaled(5 millis))) {
+        val t = monitorProbe.expectMessageType[Raft.AppendEntries[Raft.RaftReply]]
+        t.leader shouldBe clusterConfig.myId
+        t.term shouldBe 1
+      }
+
+    }
+
+    "must not get elected without majority votes" in {
+
+      implicit val clusterConfig: Cluster = new Cluster {
+
+        def otherMembers = Set(20)
         override def members: Set[Int] = otherMembers + myId
 
         override def memberRefs =
@@ -184,7 +230,14 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike wit
       manualTime.timePasses(electionTimeout)
       eventually (timeout(scaled(5 seconds)), interval(scaled(5 millis))) {
         r ! Raft.GetState(probe.ref)
-        probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Leader"))
+        probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Candidate"))
+      }
+
+      manualTime.timePasses(electionTimeout)
+
+      eventually (timeout(scaled(5 seconds)), interval(scaled(5 millis))) {
+        r ! Raft.GetState(probe.ref)
+        probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 2, mode = "Candidate"))
       }
 
     }

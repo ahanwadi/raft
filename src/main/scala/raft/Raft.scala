@@ -2,10 +2,11 @@ package raft
 
 import akka.actor.typed.scaladsl.{ActorContext, Behaviors, TimerScheduler}
 import akka.actor.typed.{ActorRef, Behavior}
-import akka.persistence.typed.{PersistenceId, RecoveryCompleted}
 import akka.persistence.typed.scaladsl.EventSourcedBehavior.CommandHandler
 import akka.persistence.typed.scaladsl.{Effect, EventSourcedBehavior}
+import akka.persistence.typed.{ExpectingReply, PersistenceId, RecoveryCompleted}
 import com.typesafe.config.Config
+
 import scala.concurrent.duration.{Duration, FiniteDuration}
 
 object Raft {
@@ -34,7 +35,9 @@ object Raft {
     def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]): CommandHandler[RaftCmd, Raft.Event, Raft.State]
 
     def defhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) : PartialFunction[RaftCmd, Effect[Raft.Event, Raft.State]] = {
-      case e: Term if e.term > currentTerm => Effect.persist(NewTerm(e.term))
+      case e: Term if e.term > currentTerm => Effect.persist(NewTerm(e.term)).thenRun { state =>
+        state.enterMode(timers, context)
+      }
       case e: Term if e.term < currentTerm => Effect.none
       case c: GetState =>
         c.sender ! CurrentState(myId, currentTerm, getMode)
@@ -42,7 +45,7 @@ object Raft {
     }
   }
 
-  final case class Follower(myId: Int, currentTerm: Int = 0, votedFor: Option[ServerId] = None) extends State {
+  final case class Follower(myId: Int, currentTerm: Int = 0, votedFor: Option[Int] = None) extends State {
 
     def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]): CommandHandler[RaftCmd, Event, State] = CommandHandler.command { case cmd =>
 
@@ -57,6 +60,19 @@ object Raft {
           Effect.persist(NewTerm(currentTerm + 1, Some(myId))).thenRun { state =>
             state.enterMode(timers, context)
           }
+        case cmd @ RequestVote(term, candidate, _) if votedFor.isEmpty =>
+          context.log.info(s"Voting for $candidate in $term")
+          Effect.persist(NewTerm(term, Some(candidate))).thenRun { state: Raft.State =>
+            state.enterMode(timers, context)
+          }.thenReply(cmd) { _ =>
+            Vote(term, myId, Some(candidate), true)
+          }
+        case cmd @ RequestVote(term, _, _) if votedFor.isDefined =>
+          Effect.none.thenRun { state: Raft.State =>
+            state.enterMode(timers, context)
+          }.thenReply(cmd) { _ =>
+            Vote(term, myId, votedFor, false)
+          }
         case _ => Effect.unhandled
       }
     }
@@ -68,8 +84,34 @@ object Raft {
 
     override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) = CommandHandler.command { cmd =>
       cmd match {
-        case heartbeat @ AppendEntries(term, leader, _) => Effect.none
-        case HeartbeatTimeout => Effect.persist(NewTerm(currentTerm + 1, Some(myId)))
+        case heartbeat @ AppendEntries(term, leader, _) =>
+          /* Transition to follower. What if term is same currentTerm? and
+           * the leader crashes? In that case, entire existing quorum set of
+           * servers won't be transitioning to candidate themselves and they
+           * won't vote for us either or anyone else. In that case, election
+           * will timeout and goto next term.
+           */
+          Effect.persist(NewTerm(term, None)).thenRun { state =>
+           state.enterMode(timers, context)
+          }
+        case cmd @ RequestVote(term, candidate, _) if term > currentTerm =>
+          context.log.info(s"Got request vote with higher term - $term than $currentTerm")
+          Effect.persist(NewTerm(term, Some(candidate))).thenRun { state: Raft.State =>
+            state.enterMode(timers, context)
+          }.thenReply(cmd) { _ =>
+            Vote(term, myId, Some(candidate), true)
+          }
+        case cmd @ RequestVote(term, _, _) =>
+          Effect.none.thenRun { state: Raft.State =>
+            state.enterMode(timers, context)
+          }.thenReply(cmd) { _ =>
+            context.log.info(s"Rejecting vote in the same term - $term ($currentTerm) as a candidate")
+            Vote(term, myId, votedFor, false)
+          }
+        case HeartbeatTimeout =>
+          Effect.persist(NewTerm(currentTerm + 1, Some(myId))).thenRun { state =>
+            state.enterMode(timers, context)
+          }
         case _ => Effect.none
       }
     }
@@ -97,10 +139,10 @@ object Raft {
 
 
   sealed trait RaftCmd
-  final case class RequestVote(term: Int, candidate: ServerId, from: ActorRef[RaftCmd]) extends RaftCmd with Term
-  final case class Vote(term: Int, voter: ServerId, votedFor: Option[ServerId], result: Boolean) extends RaftCmd with Term
-  final case class AppendEntries(term: Int, leader: ServerId, from: ActorRef[RaftCmd]) extends RaftCmd with Term
-  final case class HeartbeatResponse(term: Int, id: ServerId) extends RaftCmd with Term
+  final case class RequestVote[Reply](term: Int, candidate: Int, override val replyTo: ActorRef[RaftCmd]) extends RaftCmd with Term with ExpectingReply[Vote]
+  final case class Vote(term: Int, voter: Int, votedFor: Option[Int], result: Boolean) extends RaftCmd with Term
+  final case class AppendEntries(term: Int, leader: Int, from: ActorRef[RaftCmd]) extends RaftCmd with Term
+  final case class HeartbeatResponse(term: Int, id: Int) extends RaftCmd with Term
   final case object HeartbeatTimeout extends RaftCmd
 
   sealed trait ClientProto extends RaftCmd
@@ -151,8 +193,8 @@ object Raft {
          * When votedFor == empty or votedFor != myId became follower
          * Else goto Candidate.
          */
-      case NewTerm(term, Some(votedFor)) if votedFor == state.myId => Candidate(state.myId, term, Some(votedFor))
-      case NewTerm(term, _) => Follower(state.myId, term)
+      case NewTerm(term, votedFor) if votedFor == Some(state.myId) => Candidate(state.myId, term, votedFor)
+      case NewTerm(term, votedFor) => Follower(state.myId, term, votedFor)
     }
   }
 

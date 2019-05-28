@@ -50,7 +50,7 @@ object Raft {
     def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]): CommandHandler[RaftCmd, Event, State] = CommandHandler.command { case cmd =>
 
       cmd match {
-        case heartbeat@AppendEntries(term, leader, _) =>
+        case AppendEntries(_, _, _) =>
           /* On heartbeat restart the timer, only if heartbeat is for the current term */
           /* TODO: Do we need to verify if heartbeat is from leader of the current term */
           Effect.none.thenRun { state =>
@@ -67,7 +67,7 @@ object Raft {
           }.thenReply(cmd) { _ =>
             Vote(term, myId, Some(candidate), true)
           }
-        case cmd @ RequestVote(term, _, _) if votedFor.isDefined =>
+        case cmd @ RequestVote(term, _, _) =>
           Effect.none.thenRun { state: Raft.State =>
             state.enterMode(timers, context)
           }.thenReply(cmd) { _ =>
@@ -84,7 +84,7 @@ object Raft {
 
     override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) = CommandHandler.command { cmd =>
       cmd match {
-        case heartbeat @ AppendEntries(term, leader, _) =>
+        case AppendEntries(term, _, _) =>
           /* Transition to follower. What if term is same currentTerm? and
            * the leader crashes? In that case, entire existing quorum set of
            * servers won't be transitioning to candidate themselves and they

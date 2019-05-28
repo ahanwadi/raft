@@ -65,7 +65,7 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike {
       probe.expectMessage(Raft.CurrentState(myId, 0, "Follower"))
 
       r ! Raft.RequestVote(0, 0, probe.ref)
-      probe.expectMessage(Raft.Vote(0, myId, Some(0), true))
+      probe.expectMessage(Raft.RaftReply(0, myId, Some(0), true))
 
       r ! Raft.GetState(probe.ref)
       probe.expectMessage(Raft.CurrentState(id = myId, term = 0, mode = "Follower"))
@@ -85,7 +85,7 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike {
       probe.expectMessage(Raft.CurrentState(id = myId, term = 1, mode = "Candidate"))
 
       r ! Raft.RequestVote(term = 1, candidate = 0, replyTo = probe.ref)
-      probe.expectMessage(Raft.Vote(term = 1, voter = myId, votedFor = Some(myId), result = false))
+      probe.expectMessage(Raft.RaftReply(term = 1, voter = myId, votedFor = Some(myId), result = false))
 
       r ! Raft.GetState(probe.ref)
       probe.expectMessage(Raft.CurrentState(id = myId, term = 1, mode = "Candidate"))
@@ -101,14 +101,30 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike {
       probe.expectMessage(Raft.CurrentState(myId, 0, "Follower"))
 
       r ! Raft.RequestVote(term = 0, candidate = 0, replyTo = probe.ref)
-      probe.expectMessage(Raft.Vote(term = 0, voter = myId, votedFor = Some(0), result = true))
+      probe.expectMessage(Raft.RaftReply(term = 0, voter = myId, votedFor = Some(0), result = true))
 
       r ! Raft.GetState(probe.ref)
       probe.expectMessage(Raft.CurrentState(id = myId, term = 0, mode = "Follower"))
 
       r ! Raft.RequestVote(term = 0, candidate = 1, replyTo = probe.ref)
-      probe.expectMessage(Raft.Vote(term = 0, voter = myId, votedFor = Some(0), result = false))
+      probe.expectMessage(Raft.RaftReply(term = 0, voter = myId, votedFor = Some(0), result = false))
     }
+
+    "should accept newer leader" in {
+      val myId = (new Random()).nextInt()
+      val r = spawn(raft.Raft(Some(myId)))
+      val probe = createTestProbe[Raft.RaftCmd]()
+
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(myId, 0, "Follower"))
+
+      r ! Raft.AppendEntries(term = 1, leader = 1, replyTo = probe.ref)
+      probe.expectMessage(Raft.RaftReply(term = 1, voter = myId, votedFor = None, result = true))
+
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(id = myId, term = 1, mode = "Follower"))
+    }
+
   }
 }
 

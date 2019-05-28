@@ -40,12 +40,21 @@ object Raft {
         Effect.persist(NewTerm(term, Some(candidate))).thenRun { state: Raft.State =>
           state.enterMode(timers, context)
         }.thenReply(cmd) { _ =>
-          Vote(term, myId, Some(candidate), true)
+          RaftReply(term, myId, Some(candidate), true)
         }
+      case cmd @ AppendEntries(term, leader, _) if term > currentTerm =>
+        context.log.info(s"Got heartbeat from new leader $leader in $term")
+        Effect.persist(NewTerm(term, None)).thenRun { state: Raft.State =>
+          state.enterMode(timers, context)
+        }.thenReply(cmd) { _ =>
+          RaftReply(term, myId, None, true)
+        }
+      case cmd: (ExpectingReply[RaftReply] with Term) if cmd.term < currentTerm =>
+        Effect.reply(cmd)(RaftReply(currentTerm, myId, None, false))
       case e: Term if e.term > currentTerm =>
         Effect.persist(NewTerm(e.term)).thenRun { state =>
-        state.enterMode(timers, context)
-      }
+          state.enterMode(timers, context)
+        }
       case e: Term if e.term < currentTerm => Effect.none
       case c: GetState =>
         c.sender ! CurrentState(myId, currentTerm, getMode)
@@ -58,16 +67,14 @@ object Raft {
     def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]): CommandHandler[RaftCmd, Event, State] = CommandHandler.command { case cmd =>
 
       cmd match {
-        case AppendEntries(term, _, _) if term == currentTerm =>
+        case cmd @ AppendEntries(term, leader, _) if term == currentTerm =>
           /* On heartbeat restart the timer, only if heartbeat is for the current term */
           /* TODO: Do we need to verify if heartbeat is from leader of the current term? */
-          Effect.none.thenRun { state =>
+          context.log.info(s"Got heartbeat from leader: $leader for $term")
+          Effect.none.thenRun { state: State =>
             state.enterMode(timers, context)
-          }
-        case AppendEntries(term, _, _) if term > currentTerm =>
-          // We just got a heartbeat from the new leader, we haven't voted.
-          Effect.persist(NewTerm(term, None)).thenRun { state =>
-            state.enterMode(timers, context)
+          }.thenReply(cmd) { _ =>
+            RaftReply(term, myId, votedFor, true)
           }
         case HeartbeatTimeout =>
           Effect.persist(NewTerm(currentTerm + 1, Some(myId))).thenRun { state =>
@@ -78,13 +85,13 @@ object Raft {
           Effect.persist(NewTerm(term, Some(candidate))).thenRun { state: Raft.State =>
             state.enterMode(timers, context)
           }.thenReply(cmd) { _ =>
-            Vote(term, myId, Some(candidate), true)
+            RaftReply(term, myId, Some(candidate), true)
           }
         case cmd @ RequestVote(term, _, _) =>
           Effect.none.thenRun { state: Raft.State =>
             state.enterMode(timers, context)
           }.thenReply(cmd) { _ =>
-            Vote(term, myId, votedFor, false)
+            RaftReply(term, myId, votedFor, false)
           }
         case _ => Effect.unhandled
       }
@@ -97,29 +104,32 @@ object Raft {
 
     override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) = CommandHandler.command { cmd =>
       cmd match {
-        case AppendEntries(term, _, _) =>
+        case cmd @ AppendEntries(term, leader, _) =>
           /* Transition to follower. What if term is same currentTerm? and
            * the leader crashes? In that case, entire existing quorum set of
            * servers won't be transitioning to candidate themselves and they
            * won't vote for us either or anyone else. In that case, election
            * will timeout and goto next term.
            */
-          Effect.persist(NewTerm(term, None)).thenRun { state =>
-           state.enterMode(timers, context)
+          context.log.info(s"Got heartbeat from leader: $leader for $term")
+          Effect.persist(NewTerm(term, None)).thenRun { state: State =>
+            state.enterMode(timers, context)
+          }.thenReply(cmd) { _ =>
+            RaftReply(term, myId, votedFor, true)
           }
         case cmd @ RequestVote(term, candidate, _) if term > currentTerm =>
           context.log.info(s"Got request vote with higher term - $term than $currentTerm")
           Effect.persist(NewTerm(term, Some(candidate))).thenRun { state: Raft.State =>
             state.enterMode(timers, context)
           }.thenReply(cmd) { _ =>
-            Vote(term, myId, Some(candidate), true)
+            RaftReply(term, myId, Some(candidate), true)
           }
         case cmd @ RequestVote(term, _, _) =>
           Effect.none.thenRun { state: Raft.State =>
             state.enterMode(timers, context)
           }.thenReply(cmd) { _ =>
             context.log.info(s"Rejecting vote in the same term - $term ($currentTerm) as a candidate")
-            Vote(term, myId, votedFor, false)
+            RaftReply(term, myId, votedFor, false)
           }
         case HeartbeatTimeout =>
           Effect.persist(NewTerm(currentTerm + 1, Some(myId))).thenRun { state =>
@@ -152,10 +162,9 @@ object Raft {
 
 
   sealed trait RaftCmd
-  final case class RequestVote[Reply](term: Int, candidate: Int, override val replyTo: ActorRef[RaftCmd]) extends RaftCmd with Term with ExpectingReply[Vote]
-  final case class Vote(term: Int, voter: Int, votedFor: Option[Int], result: Boolean) extends RaftCmd with Term
-  final case class AppendEntries(term: Int, leader: Int, from: ActorRef[RaftCmd]) extends RaftCmd with Term
-  final case class HeartbeatResponse(term: Int, id: Int) extends RaftCmd with Term
+  final case class RaftReply(term: Int, voter: Int, votedFor: Option[Int], result: Boolean) extends RaftCmd with Term
+  final case class RequestVote[Reply](term: Int, candidate: Int, override val replyTo: ActorRef[RaftCmd]) extends RaftCmd with Term with ExpectingReply[RaftReply]
+  final case class AppendEntries[Reply](term: Int, leader: Int, override val replyTo: ActorRef[RaftCmd]) extends RaftCmd with Term with ExpectingReply[RaftReply]
   final case object HeartbeatTimeout extends RaftCmd
 
   sealed trait ClientProto extends RaftCmd
@@ -191,10 +200,10 @@ object Raft {
   def dispatcher(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) : (Raft.State, RaftCmd) => Effect[Raft.Event, Raft.State] = {
     (state: Raft.State, cmd: RaftCmd) => {
       def secondhandler: PartialFunction[RaftCmd, Effect[Raft.Event, Raft.State]] = { case c =>
-          state.commandhandler(timers, context)(state, c)
+        state.commandhandler(timers, context)(state, c)
       }
       val y: Effect[Event, State] =
-      state.defhandler(timers, context = context).orElse(secondhandler)(cmd)
+        state.defhandler(timers, context = context).orElse(secondhandler)(cmd)
       y
     }
   }

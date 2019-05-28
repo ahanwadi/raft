@@ -5,8 +5,9 @@ import akka.actor.typed.scaladsl.Behaviors
 import akka.persistence.typed.ExpectingReply
 import com.typesafe.config.Config
 import org.junit.runner.RunWith
-import org.scalatest.{BeforeAndAfter, BeforeAndAfterEach, Informing, WordSpecLike}
 import org.scalatest.junit.JUnitRunner
+import org.scalatest.{BeforeAndAfter, Informing, WordSpecLike}
+import org.scalatest.time.SpanSugar._
 import raft.Raft.{RaftReply, RequestVote, Term}
 
 import scala.concurrent.duration.{Duration, FiniteDuration}
@@ -151,7 +152,7 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike wit
 
     }
 
-    "should get elected as leader" in {
+    "should get elected as leader unanimously" in {
 
       implicit val clusterConfig: Cluster = new Cluster {
 
@@ -181,14 +182,11 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike wit
       probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
       manualTime.timePasses(electionTimeout)
+      eventually (timeout(scaled(5 seconds)), interval(scaled(5 millis))) {
+        r ! Raft.GetState(probe.ref)
+        probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Leader"))
+      }
 
-      r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Candidate"))
-
-      manualTime.timePasses(electionTimeout)
-
-      r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Leader"))
     }
 
   }

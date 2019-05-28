@@ -1,0 +1,21 @@
+language: scala
+
+sudo: false
+
+scala:
+  - "2.12.8"
+
+cache:
+  directories:
+    - $HOME/.ivy2/cache
+    - $HOME/.gradle/caches
+    - $HOME/.gradle/wrapper/
+
+
+before_cache:
+  - rm -f  $HOME/.gradle/caches/modules-2/modules-2.lock
+  - rm -fr $HOME/.gradle/caches/*/plugin-resolution/
+
+branches:
+  only:
+  - akka-typed

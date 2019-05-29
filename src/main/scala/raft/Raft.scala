@@ -108,7 +108,8 @@ object Raft {
 
     override def enterMode(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = {
       context.log.info(s"Requesting votes in term $currentTerm")
-      clusterConfig.memberRefs.foreach { member =>
+      clusterConfig.memberRefs.filter(member => !votes.contains(member._1)).foreach { member =>
+        context.log.info(s"Requesting vote in term $currentTerm from: $member._1")
         member._2 ! RequestVote(currentTerm, myId, context.self)
       }
       super.enterMode(timers, context, clusterConfig)

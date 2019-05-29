@@ -179,18 +179,27 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike wit
         override val myId: Int = (new Random()).nextInt()
       }
 
-      val r = spawn(raft.Raft())
+      val r = spawn(raft.Raft(), "SuccessfulElection")
 
       r ! Raft.GetState(probe.ref)
       probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
+
       manualTime.timePasses(electionTimeout)
-      eventually (timeout(scaled(5 seconds)), interval(scaled(5 millis))) {
+      eventually (timeout(scaled(electionTimeout*2)), interval(scaled(2 seconds))) {
+        r ! Raft.GetState(probe.ref)
+        val t = probe.expectMessageType[Raft.CurrentState]
+        t.term shouldBe 1
+        t.id shouldBe clusterConfig.myId
+        List("Leader", "Candidate") should contain (t.mode)
+      }
+
+      eventually (timeout(scaled(electionTimeout*2)), interval(scaled(2 seconds))) {
         r ! Raft.GetState(probe.ref)
         probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Leader"))
       }
 
-      eventually (timeout(scaled(5 seconds)), interval(scaled(5 millis))) {
+      eventually (timeout(scaled(electionTimeout)), interval(scaled(1 seconds))) {
         val t = monitorProbe.expectMessageType[Raft.AppendEntries[Raft.RaftReply]]
         t.leader shouldBe clusterConfig.myId
         t.term shouldBe 1
@@ -198,7 +207,7 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike wit
 
     }
 
-    "must not get elected without majority votes" in {
+    "must timeout without majority votes" in {
 
       implicit val clusterConfig: Cluster = new Cluster {
 

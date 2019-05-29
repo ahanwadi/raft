@@ -207,7 +207,7 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike wit
 
     }
 
-    "must timeout without majority votes" in {
+    "leader election should timeout without majority votes" in {
 
       implicit val clusterConfig: Cluster = new Cluster {
 

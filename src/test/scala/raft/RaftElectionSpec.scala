@@ -251,6 +251,68 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike wit
 
     }
 
+    "leader should transition to follower on seeing higher term" in {
+      val monitorProbe = testKit.createTestProbe[RaftCmd]()
+
+      implicit val clusterConfig: Cluster = new Cluster {
+
+        def otherMembers = Set(40, 50)
+        override def members: Set[Int] = otherMembers + myId
+
+        override def memberRefs =
+          otherMembers.map { member =>
+            (member, spawn(behavior = Behaviors.monitor(monitor = monitorProbe.ref,
+              behavior = Behaviors.receive[Raft.RaftCmd] { (_, cmd) =>
+                cmd match {
+                  case RequestVote(term, candidate, replyTo) =>
+                    replyTo ! RaftReply(term, member, Some(candidate), true)
+                    Behaviors.same
+                  case req: (Term with ExpectingReply[RaftReply]) =>
+                    req.replyTo ! RaftReply(0, member, None, true)
+                    Behaviors.same
+                }
+              })))
+          }.toMap
+
+        override val myId: Int = (new Random()).nextInt()
+      }
+
+      val r = spawn(raft.Raft())
+
+      r ! Raft.GetState(probe.ref)
+      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
+
+
+      manualTime.timePasses(electionTimeout)
+      eventually (timeout(scaled(electionTimeout*2)), interval(scaled(2 seconds))) {
+        r ! Raft.GetState(probe.ref)
+        val t = probe.expectMessageType[Raft.CurrentState]
+        t.term shouldBe 1
+        t.id shouldBe clusterConfig.myId
+        List("Leader", "Candidate") should contain (t.mode)
+      }
+
+      eventually (timeout(scaled(electionTimeout*2)), interval(scaled(2 seconds))) {
+        r ! Raft.GetState(probe.ref)
+        probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Leader"))
+      }
+
+      /* Should see heartbeats */
+      eventually (timeout(scaled(electionTimeout)), interval(scaled(1 seconds))) {
+        val t = monitorProbe.expectMessageType[Raft.AppendEntries[Raft.RaftReply]]
+        t.leader shouldBe clusterConfig.myId
+        t.term shouldBe 1
+      }
+
+      r ! Raft.RequestVote(2, 50, monitorProbe.ref)
+
+      eventually (timeout(scaled(electionTimeout*2)), interval(scaled(2 seconds))) {
+        r ! Raft.GetState(probe.ref)
+        probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 2, mode = "Follower"))
+      }
+
+    }
+
   }
 }
 

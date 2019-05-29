@@ -1,20 +1,20 @@
 package raft
 
-import akka.actor.testkit.typed.scaladsl.{ManualTime, ScalaTestWithActorTestKit, TestProbe}
+import akka.actor.testkit.typed.scaladsl.{FishingOutcomes, ManualTime, ScalaTestWithActorTestKit, TestProbe}
 import akka.actor.typed.scaladsl.Behaviors
 import akka.persistence.typed.ExpectingReply
 import com.typesafe.config.Config
 import org.junit.runner.RunWith
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.{BeforeAndAfter, Informing, WordSpecLike}
 import org.scalatest.time.SpanSugar._
-import raft.Raft.{AppendEntries, RaftCmd, RaftReply, RequestVote, Term}
+import org.scalatest.{BeforeAndAfter, Informing, WordSpecLike}
+import raft.Raft.{RaftCmd, RaftReply, RequestVote, Term}
 
 import scala.concurrent.duration.{Duration, FiniteDuration}
 import scala.util.Random
 
 @RunWith(classOf[JUnitRunner])
-class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike with BeforeAndAfter with Informing {
+class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike with BeforeAndAfter {
 
   "Raft Server" must {
 
@@ -282,19 +282,19 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike wit
       r ! Raft.GetState(probe.ref)
       probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
-
       manualTime.timePasses(electionTimeout)
-      eventually (timeout(scaled(electionTimeout*2)), interval(scaled(2 seconds))) {
-        r ! Raft.GetState(probe.ref)
-        val t = probe.expectMessageType[Raft.CurrentState]
-        t.term shouldBe 1
-        t.id shouldBe clusterConfig.myId
-        List("Leader", "Candidate") should contain (t.mode)
-      }
-
-      eventually (timeout(scaled(electionTimeout*2)), interval(scaled(2 seconds))) {
-        r ! Raft.GetState(probe.ref)
-        probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Leader"))
+      r ! Raft.GetState(probe.ref)
+      probe.fishForMessage(electionTimeout*4) {
+        case Raft.CurrentState(id, term, _) if term != 1 || id != clusterConfig.myId => FishingOutcomes.fail("Got message with wrong term or id")
+        case Raft.CurrentState(_, _, "Candidate") => {
+          r ! Raft.GetState(probe.ref)
+          FishingOutcomes.continue
+        }
+        case Raft.CurrentState(_, _, "Leader") => FishingOutcomes.complete
+        case _ => {
+          r ! Raft.GetState(probe.ref)
+          FishingOutcomes.continueAndIgnore
+        }
       }
 
       /* Should see heartbeats */

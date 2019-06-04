@@ -8,7 +8,7 @@ import org.junit.runner.RunWith
 import org.scalatest.junit.JUnitRunner
 import org.scalatest.time.SpanSugar._
 import org.scalatest.{BeforeAndAfter, Informing, WordSpecLike}
-import raft.Raft.{RaftCmd, RaftReply, RequestVote, Term}
+import raft.Raft.{LogIndex, RaftCmd, RaftReply, RequestVote, Term}
 
 import scala.concurrent.duration.{Duration, FiniteDuration}
 import scala.util.Random
@@ -121,13 +121,13 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike wit
     }
 
     "should accept newer leader" in {
-      val r = spawn(raft.Raft())
+      val r = spawn(raft.Raft(), this.suiteName)
       val probe = createTestProbe[Raft.RaftCmd]()
 
       r ! Raft.GetState(probe.ref)
       probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
-      r ! Raft.AppendEntries(term = 1, leader = 1, replyTo = probe.ref)
+      r ! Raft.AppendEntries(term = 1, leader = 1, replyTo = probe.ref, prevLog = LogIndex(), leaderCommit = LogIndex())
       probe.expectMessage(Raft.RaftReply(term = 1, voter = clusterConfig.myId, votedFor = None, result = true))
 
       r ! Raft.GetState(probe.ref)
@@ -147,7 +147,7 @@ class RaftElectionSpec extends ScalaTestWithActorTestKit() with WordSpecLike wit
       r ! Raft.GetState(probe.ref)
       probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 1, mode = "Candidate"))
 
-      r ! Raft.AppendEntries(term = 0, leader = 1, replyTo = probe.ref)
+      r ! Raft.AppendEntries(term = 0, leader = 1, replyTo = probe.ref, prevLog = LogIndex(), leaderCommit = LogIndex())
       probe.expectMessage(Raft.RaftReply(term = 1, voter = clusterConfig.myId, votedFor = None, result = false))
 
     }

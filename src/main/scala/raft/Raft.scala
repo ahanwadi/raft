@@ -1,5 +1,6 @@
 package raft
 
+import scala.collection.{ immutable => im }
 import akka.actor.typed.scaladsl.{ActorContext, Behaviors, TimerScheduler}
 import akka.actor.typed.{ActorRef, Behavior}
 import akka.persistence.typed.scaladsl.EventSourcedBehavior.CommandHandler
@@ -15,6 +16,20 @@ object Raft {
     def myId: Int
   }
 
+
+  case class LogIndex(term: Int =0, index: Int = 0)
+  case class Log(index: LogIndex, cmd: RSMCmd) extends Event
+
+  case class RSM(logs: Array[Log] = Array(), committed: LogIndex = LogIndex(), applied: LogIndex = LogIndex()) {
+    def getPrevIndex() = {
+      if (logs.isEmpty) {
+        LogIndex()
+      } else {
+        logs.last.index
+      }
+    }
+  }
+
   /* Current Election Term */
   sealed trait Term {
     def term: Int
@@ -25,11 +40,21 @@ object Raft {
 
   // The persistent state stored by all servers.
   sealed trait State {
-    def eventHandler(clusterConfig: Cluster, evt: Event): State = this
+    def value: Int = 0
 
-    def myId: Int
-    def currentTerm: Int
+    def eventHandler(clusterConfig: Cluster, evt: Event): State = evt match {
+      /*
+       * When votedFor == empty or votedFor != myId became follower
+       * Else goto Candidate.
+       */
+      case NewTerm(term, votedFor) if votedFor == Some(myId) => Candidate(myId, term, votedFor, rsm = rsm)
+      case NewTerm(term, votedFor) => Follower(myId, term, votedFor, rsm = rsm)
+    }
 
+    def myId: Int = 0
+    def currentTerm: Int = 0
+
+    def rsm: RSM = RSM()
     def getMode: String
 
     def enterMode(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = {
@@ -46,10 +71,15 @@ object Raft {
         }.thenReply(cmd) { _ =>
           RaftReply(term, myId, Some(candidate), true)
         }
-      case cmd @ AppendEntries(term, leader, _) if term > currentTerm =>
+      case cmd @ AppendEntries(term, leader, _, _, _, logs) if term > currentTerm =>
         context.log.info(s"Got heartbeat from new leader $leader in $term")
-        Effect.persist(NewTerm(term, None)).thenRun { state: Raft.State =>
-          state.enterMode(timers, context, clusterConfig)
+        /* We assume that leader is sending us only the diff/new logs for the RSM and not
+         * internal leader election events.
+         */
+        val evt: Event = NewTerm(term, None)
+        val newLogs: im.Seq[Event] = logs.map(identity)(collection.breakOut) ++ im.Seq(evt)
+        Effect.persist(newLogs).thenRun { state: State =>
+            state.enterMode(timers, context, clusterConfig)
         }.thenReply(cmd) { _ =>
           RaftReply(term, myId, None, true)
         }
@@ -61,17 +91,17 @@ object Raft {
         }
       case e: Term if e.term < currentTerm => Effect.none
       case c: GetState =>
-        c.sender ! CurrentState(myId, currentTerm, getMode)
-        Effect.none
+        Effect.reply(c) (CurrentState(myId, currentTerm, getMode))
     }
   }
 
-  final case class Follower(myId: Int, currentTerm: Int = 0, votedFor: Option[Int] = None) extends State {
+  final case class Follower(override val myId: Int, override val currentTerm: Int = 0, votedFor: Option[Int] = None,
+                            override val rsm: RSM = RSM()) extends State {
 
     def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster): CommandHandler[RaftCmd, Event, State] = CommandHandler.command { case cmd =>
 
       cmd match {
-        case cmd @ AppendEntries(term, leader, _) if term == currentTerm =>
+        case cmd @ AppendEntries(term, leader, _, _, _, _) if term == currentTerm =>
           /* On heartbeat restart the timer, only if heartbeat is for the current term */
           /* TODO: Do we need to verify if heartbeat is from leader of the current term? */
           context.log.info(s"Got heartbeat from leader: $leader for $term")
@@ -104,7 +134,9 @@ object Raft {
     override def getMode: String = "Follower"
   }
 
-  final case class Candidate(myId: Int, currentTerm: Int = 0, votedFor: Option[Int], votes: Set[Int] = Set()) extends State {
+  final case class Candidate(override val myId: Int, override val currentTerm: Int = 0, votedFor: Option[Int] = None,
+                             votes: Set[Int] = Set(),
+                             override val rsm: RSM = RSM()) extends State {
 
     override def enterMode(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = {
       context.log.info(s"Requesting votes in term $currentTerm")
@@ -120,7 +152,7 @@ object Raft {
         case GotVote(term, voter) if term == currentTerm && clusterConfig.members.contains(voter) => {
           val voters = votes + voter
           if (voters.size >= clusterConfig.quorumSize) {
-            Leader(myId, currentTerm)
+            Leader(myId, currentTerm, value, rsm)
           } else {
             copy(votes = voters)
           }
@@ -131,7 +163,7 @@ object Raft {
 
     override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = CommandHandler.command { cmd =>
       cmd match {
-        case cmd @ AppendEntries(term, leader, _) =>
+        case cmd @ AppendEntries(term, leader, _, _, _, _) =>
           /* Transition to follower. What if term is same currentTerm? and
            * the leader crashes? In that case, entire existing quorum set of
            * servers won't be transitioning to candidate themselves and they
@@ -175,42 +207,91 @@ object Raft {
     override def getMode: String = "Candidate"
   }
 
-  final case class Leader(myId: Int, currentTerm: Int) extends State {
+  final case class Leader(override val myId: Int, override val currentTerm: Int,
+                          override val value: Int = 0, override val rsm: RSM = RSM()) extends State {
+
+    def getAppendEntries(member: Int, context: ActorContext[RaftCmd]): AppendEntries[RaftCmd] = {
+      AppendEntries(currentTerm, myId, context.self, rsm.getPrevIndex(), rsm.committed, rsm.logs.take(1))
+    }
 
     override def enterMode(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = {
       clusterConfig.memberRefs.foreach { member =>
-        member._2 ! AppendEntries(currentTerm, myId, context.self)
+        /* TODO: Get prevLog from each member */
+        member._2 ! AppendEntries(currentTerm, myId, context.self, rsm.getPrevIndex(), rsm.committed)
       }
       super.enterMode(timers, context, clusterConfig)
     }
 
+    def sendAppendEntries(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = {
+      clusterConfig.memberRefs.foreach { member =>
+        /* TODO: Get prevLog from each member */
+        member._2 ! AppendEntries(currentTerm, myId, context.self, rsm.getPrevIndex(), rsm.committed, rsm.logs.take(1))
+      }
+    }
+
     override def commandhandler(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd], clusterConfig: Cluster) = CommandHandler.command { cmd =>
       cmd match {
-        case HeartbeatTimeout => Effect.none // Send heartbeat
+        case HeartbeatTimeout =>
+          Effect.none.thenRun { state: Raft.State =>
+            state.enterMode(timers, context, clusterConfig)
+          }
+        case cmd : GetValue =>
+          Effect.none.thenReply(cmd) { s: State =>
+           ValueIs(s.value)
+          }
+        case cmd @ SetValue(v, _) =>
+          Effect.persist(Log(index = LogIndex(currentTerm, rsm.committed.index+1), cmd = SettingValue(v)))
+            .thenRun { st: State =>
+              st match {
+                case s: Leader =>
+                  s.sendAppendEntries(timers, context, clusterConfig)
+                  Effect.none
+                case _ => Effect.none
+              }
+            }
+            .thenReply(cmd) { s: State =>
+              ValueIs(s.value)
+            }
         case _ => Effect.none
       }
+    }
+
+    override def eventHandler(clusterConfig: Cluster, evt: Event): State = evt match {
+      case cmd @ Log(index, SettingValue(v)) =>
+        val newCommitIndex = rsm.committed.copy(term = currentTerm, index = rsm.committed.index + 1)
+        val newLogs = rsm.logs :+ cmd
+        this.copy(value = v, rsm = rsm.copy(committed = index, logs = newLogs))
+      case _ => super.eventHandler(clusterConfig, evt)
     }
 
     override def getMode: String = "Leader"
   }
 
   sealed trait Event {
-    def term: Int
   }
 
   final case class NewTerm(term: Int, votedFor: Option[Int] = None) extends Event
   final case class GotVote(term: Int, voters: Int) extends Event
 
+  sealed trait RSMCmd
+  final case class SettingValue(value: Int) extends RSMCmd
+
 
   sealed trait RaftCmd
   final case class RaftReply(term: Int, voter: Int, votedFor: Option[Int], result: Boolean) extends RaftCmd with Term
   final case class RequestVote[Reply](term: Int, candidate: Int, override val replyTo: ActorRef[RaftCmd]) extends RaftCmd with Term with ExpectingReply[RaftReply]
-  final case class AppendEntries[Reply](term: Int, leader: Int, override val replyTo: ActorRef[RaftCmd]) extends RaftCmd with Term with ExpectingReply[RaftReply]
+  final case class AppendEntries[Reply](term: Int, leader: Int, override val replyTo: ActorRef[RaftCmd],
+                                        prevLog: LogIndex, leaderCommit: LogIndex, log: Array[Log] = Array()) extends RaftCmd with Term with ExpectingReply[RaftReply]
   final case object HeartbeatTimeout extends RaftCmd
 
   sealed trait ClientProto extends RaftCmd
-  final case class GetState(sender: ActorRef[ClientProto]) extends ClientProto
+  final case class GetState(replyTo: ActorRef[ClientProto]) extends ClientProto with ExpectingReply[CurrentState]
   final case class CurrentState(id: Int, term: Int, mode: String) extends ClientProto
+
+  sealed trait ClientCmd extends ClientProto
+  final case class GetValue(replyTo: ActorRef[ClientCmd]) extends ClientCmd with ExpectingReply[ClientCmd]
+  final case class SetValue(value: Int, replyTo: ActorRef[ClientCmd]) extends ClientCmd with ExpectingReply[ClientCmd]
+  final case class ValueIs(value: Int) extends ClientCmd
 
   def startHeartbeatTimer(timers: TimerScheduler[RaftCmd], context: ActorContext[RaftCmd]) = {
     val raftConfig: Config = context.system.settings.config.getConfig("raft")
@@ -248,16 +329,6 @@ object Raft {
   }
 
 
-  def eventHandler(clusterConfig: Cluster): (Raft.State, Raft.Event) => Raft.State = (state: State, evt: Event) => {
-    evt match {
-        /*
-         * When votedFor == empty or votedFor != myId became follower
-         * Else goto Candidate.
-         */
-      case NewTerm(term, votedFor) if votedFor == Some(state.myId) => Candidate(state.myId, term, votedFor)
-      case NewTerm(term, votedFor) => Follower(state.myId, term, votedFor)
-      case GotVote(_, _) => state.eventHandler(clusterConfig, evt)
-    }
-  }
+  def eventHandler(clusterConfig: Cluster): (Raft.State, Raft.Event) => Raft.State = (state: State, evt: Event) => state.eventHandler(clusterConfig, evt)
 
 }

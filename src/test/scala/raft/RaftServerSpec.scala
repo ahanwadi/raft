@@ -15,7 +15,7 @@ class RaftServerSpec() extends TestKit(ActorSystem("MySpec")) with ImplicitSende
     with WordSpecLike with Matchers with BeforeAndAfterAll with Eventually {
 
 
-  override def afterAll {
+  override def afterAll = {
     TestKit.shutdownActorSystem(system)
   }
 
@@ -30,7 +30,7 @@ class RaftServerSpec() extends TestKit(ActorSystem("MySpec")) with ImplicitSende
   "A RaftServer actor" must {
     "eventually become candidate" in {
       val raftServer = system.actorOf(Props[RaftServer])
-      eventually(timeout(10 seconds), interval(1 second)) {
+      eventually(timeout(10 seconds span), interval(1 second span)) {
         raftServer ! RaftServer.GetState
         expectMsgPF() {
           case (_, Some(0)) => ()

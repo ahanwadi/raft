@@ -28,20 +28,20 @@ class RaftFSMTest() extends TestKit(ActorSystem("MySpec")) with ImplicitSender
     def unapplySeq[T](s: Set[T]): Option[Seq[T]] = Some(s.toSeq)
   }
 
-  override def beforeAll {
+  override def beforeAll = {
     raftActors = raftServers.map { server =>
       system.actorOf(Props(classOf[RaftFSM], server.id))
     }.toArray
   }
 
-  override def afterAll {
+  override def afterAll = {
     TestKit.shutdownActorSystem(system)
   }
 
   "A RaftServer actor" must {
     "start in follower mode" in {
       raftActors foreach { raftServer => raftServer ! RaftFSM.GetState }
-      eventually(timeout(10 seconds), interval(1 second)) {
+      eventually(timeout(10 seconds span), interval(1 second span)) {
         raftServers foreach { _ =>
           expectMsg( RaftFSM.ServerData(0, None, Set()) )
         }
@@ -66,7 +66,7 @@ class RaftFSMTest() extends TestKit(ActorSystem("MySpec")) with ImplicitSender
 
   "The RaftServer actor" must {
     "eventually become leader" in {
-      eventually(timeout(30 seconds), interval(2 second)) {
+      eventually(timeout(30 seconds span), interval(2 seconds span)) {
         raftActors foreach { raftServer => raftServer ! RaftFSM.IsLeader }
         expectMsgAllOf("Leader", "Follower", "Follower")
       }

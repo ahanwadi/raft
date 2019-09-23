@@ -8,7 +8,7 @@ import akka.persistence.fsm.PersistentFSM._
 import com.typesafe.config._
 import raft.RaftFSM._
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 import scala.concurrent.duration._
 import scala.reflect._
 
@@ -61,13 +61,13 @@ class RaftFSM(val myId: ServerId) extends Actor with PersistentFSM[RaftState, Se
 
   val raftConfig: Config = context.system.settings.config.getConfig("raft")
 
-  lazy val raftServers = raftConfig.getObjectList("servers").asScala.toList
+  lazy val raftServers = raftConfig.getObjectList("servers").asScala
     .map {_.toConfig()}
     .map { srvr => Server(srvr.getInt("id"), srvr.getString("address"))}
 
   lazy val quorumSize = raftServers.length/2 + 1
 
-  private val rand: util.Random = new util.Random(compat.Platform.currentTime)
+  private val rand: util.Random = new util.Random()
 
   lazy val cfgElectTimeout = raftConfig.getDuration("election-timeout").toMillis()
 

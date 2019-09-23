@@ -88,7 +88,7 @@ object Raft {
          * internal leader election events.
          */
         val evt: Event = NewTerm(term, None)
-        val newLogs: im.Seq[Event] = logs.map(identity)(collection.breakOut) ++ im.Seq(evt)
+        val newLogs: im.Seq[Event] = logs.iterator.map(identity).to(Seq) ++ im.Seq(evt)
         Effect.persist(newLogs).thenRun { state: State =>
             state.enterMode(timers, context, clusterConfig)
         }.thenReply(cmd) { _ =>
@@ -126,8 +126,8 @@ object Raft {
           /* We assume that leader is sending us only the diff/new logs for the RSM and not
            * internal leader election events.
            */
-          val newLogs: im.Seq[Event] = logs.map(identity)(collection.breakOut)
-          val f = rsm.logs.find(_.index == prevLog.index)
+          val newLogs: im.Seq[Event] = logs.iterator.map(identity).to(Seq)
+          val f = rsm.logs.find(_.index.index == prevLog.index)
           if (!f.exists{_.index.index == prevLog.index}) {
             Effect.none.thenReply(cmd) { _ =>
               RaftReply(term, myId, None, false)

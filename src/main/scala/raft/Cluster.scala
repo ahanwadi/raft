@@ -27,5 +27,3 @@ object Cluster {
     override def myId = id
   }
 }
-
-

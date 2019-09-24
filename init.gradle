@@ -1,0 +1,32 @@
+
+ext.scalaVersion = '2.13.0'
+allprojects {
+    afterEvaluate {
+        configurations {
+            scalaCompilerPlugin
+        }
+        dependencies {
+            scalaCompilerPlugin "org.scalameta:semanticdb-scalac_$scalaVersion:4.2.3"
+        }
+        def pluginFile = project.configurations.scalaCompilerPlugin.find {
+            it.name.contains("semanticdb")
+        }
+        if (!pluginFile) {
+            throw new RuntimeException("SemanticDB plugin not found!")
+        }
+        tasks.withType(ScalaCompile) {
+            def params = [
+                '-Xplugin:' + pluginFile.absolutePath,
+                '-P:semanticdb:synthetics:on',
+                '-P:semanticdb:failures:warning',
+                '-P:semanticdb:sourceroot:' + project.rootProject.projectDir,
+                '-Yrangepos',
+                '-Xplugin-require:semanticdb'
+            ]
+            if (scalaCompileOptions.additionalParameters)
+                scalaCompileOptions.additionalParameters += params
+            else
+                scalaCompileOptions.additionalParameters = params
+        }
+    }
+}

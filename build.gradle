@@ -1,17 +1,34 @@
+
+buildscript {
+  repositories {
+    mavenCentral()
+    jcenter()
+  }
+
+  dependencies {
+    classpath 'ch.epfl.scala:gradle-bloop_2.11:1.3.2'
+  }
+}
+
 plugins {
     id 'scala'
 }
 
+apply plugin: bloop.integrations.gradle.BloopPlugin
+
+ext.scalaVersion = '2.13.0'
 ext.akka_version = '2.5.25'
 
 repositories {
   mavenCentral()
   jcenter()
 }
- 
+
+
+
 dependencies {
 
-  implementation group: 'org.scala-lang', name: 'scala-library', version: '2.13'
+  implementation group: 'org.scala-lang', name: 'scala-library', version: '2.13.0'
 
   implementation group: 'ch.qos.logback', name: 'logback-classic', version: '1.2.3'
 

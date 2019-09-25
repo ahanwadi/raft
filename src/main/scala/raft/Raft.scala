@@ -12,26 +12,41 @@ import scala.concurrent.duration.{Duration, FiniteDuration}
 
 object Raft {
 
-  sealed trait ServerId {
-    def myId: Int
+
+  case class Index(idx: Int = 0) extends AnyVal with Ordered[Index] {
+    def compare(that: Index): Int = idx compare that.idx
+    def +(x: Int) = this.copy(idx = idx + 1)
+    def -(x: Int) = this.copy(idx = idx - 1)
   }
 
-  case class LogIndex(term: Int = 0, index: Int = 0) extends Ordered[LogIndex] {
+  /**
+    * Index of a log entry.
+    */
+  case class LogIndex(term: Int = 0, index: Index = Index()) extends Ordered[LogIndex] {
     import scala.math.Ordered.orderingToOrdered
 
     def compare(that: LogIndex): Int =
       (this.term, this.index) compare (that.term, that.index)
-    def +(x: Int) = this.copy(index = index + x)
+    def +(x: Index) = this.copy(index = Index(index.idx + x.idx))
+    def prev() = this.copy(index = Index(index.idx - 1))
   }
 
+  /**
+    * Each log entry has a sequence number (index) and command
+    * associated with it.
+    */
   case class Log(index: LogIndex, cmd: RSMCmd) extends Event
 
+  /**
+    * Replicated State Machine is a sequence of logs applied
+    * in order.
+    */
   case class RSM(
       logs: Array[Log] = Array(),
       committed: LogIndex = LogIndex(),
       applied: LogIndex = LogIndex()
   ) {
-    def lastLogIndex() = {
+    def lastLogIndex(): LogIndex = {
       if (logs.isEmpty) {
         LogIndex()
       } else {
@@ -44,8 +59,6 @@ object Raft {
   sealed trait Term {
     def term: Int
   }
-
-  type Index = Int
 
   // The persistent state stored by all servers.
   sealed trait State {
@@ -332,11 +345,11 @@ object Raft {
       clusterSize: Int
   ) extends State {
 
-    val prevIndexToSend = rsm.lastLogIndex().index
+    val prevIndexToSend: Index = rsm.lastLogIndex().index
 
-    val matchIndex: mutable.Map[Int, Int] = mutable.Map()
+    val matchIndex: mutable.Map[Int, Index] = mutable.Map()
 
-    val nextIndex: mutable.Map[Int, Int] = mutable.Map()
+    val nextIndex: mutable.Map[Int, Index] = mutable.Map()
 
     override def enterMode(
         timers: TimerScheduler[RaftCmd],
@@ -382,7 +395,7 @@ object Raft {
       def replicator(parent: ActorRef[RaftCmd]): Behavior[RaftReply] =
         Behaviors.setup[RaftReply] { _ =>
           def reachedQuroum(): Behavior[RaftReply] = {
-            if (matchIndex.values.filter { x: Int =>
+            if (matchIndex.values.filter { x: Index =>
                   x >= prevIndexToSend
                 }.size >= clusterConfig.quorumSize) {
               Behavior.stopped { () =>
@@ -419,7 +432,7 @@ object Raft {
           currentTerm,
           myId,
           replicatorRef,
-          rsm.lastLogIndex() + (-1),
+          rsm.lastLogIndex().prev(),
           rsm.committed,
           rsm.logs.take(1)
         )
@@ -485,7 +498,7 @@ object Raft {
   final case class NewTerm(term: Int, votedFor: Option[Int] = None)
       extends Event
   final case class GotVote(term: Int, voters: Int) extends Event
-  final case class Commit(term: Int, index: Int) extends Event
+  final case class Commit(term: Int, index: Index) extends Event
 
   sealed trait RSMCmd
   final case class SettingValue(value: Int) extends RSMCmd
@@ -534,7 +547,7 @@ object Raft {
       with ExpectingReply[ClientCmd]
   final case class ValueIs(value: Int) extends ClientCmd
 
-  final case class Replicated(index: Int, replyTo: ActorRef[ClientCmd])
+  final case class Replicated(index: Index, replyTo: ActorRef[ClientCmd])
       extends RaftCmd
       with ExpectingReply[ClientCmd]
 

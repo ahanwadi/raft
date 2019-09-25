@@ -247,7 +247,7 @@ class RaftElectionSpec
       implicit val clusterConfig: Cluster = new Cluster {
 
         def otherMembers = Set(20, 30)
-        override def members: Set[Index] = otherMembers + myId
+        override def members: Set[Int] = otherMembers + myId
 
         override def memberRefs =
           otherMembers.map { member =>
@@ -453,7 +453,7 @@ class RaftElectionSpec
       implicit val clusterConfig: Cluster = new Cluster {
 
         def otherMembers = Set(20, 30)
-        override def members: Set[Index] = otherMembers + myId
+        override def members: Set[Int] = otherMembers + myId
 
         override def memberRefs =
           otherMembers.map { member =>

@@ -4,13 +4,13 @@ import akka.actor.typed.ActorRef
 
 trait Cluster {
 
-  def myId: Int
+  def myId: Raft.ServerId
 
-  def members: Set[Int] = Set(myId)
+  def members: Set[Raft.ServerId] = Set(myId)
 
-  def memberRefs: Map[Int, ActorRef[Raft.RaftCmd]] = Map()
+  def memberRefs: Map[Raft.ServerId, ActorRef[Raft.RaftCmd]] = Map()
 
-  def memberRef(id: Int): ActorRef[Raft.RaftCmd] = memberRefs(id)
+  def memberRef(id: Raft.ServerId): ActorRef[Raft.RaftCmd] = memberRefs(id)
 
   def quorumSize: Int = (clusterSize / 2) + 1
 
@@ -20,10 +20,10 @@ trait Cluster {
 
 object Cluster {
   def apply() = new Cluster {
-    override def myId = 1
+    override def myId = Raft.ServerId(1)
   }
 
-  def apply(id: Int) = new Cluster {
+  def apply(id: Raft.ServerId) = new Cluster {
     override def myId = id
   }
 }

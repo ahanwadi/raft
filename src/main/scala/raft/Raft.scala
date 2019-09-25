@@ -12,12 +12,22 @@ import scala.concurrent.duration.{Duration, FiniteDuration}
 
 object Raft {
 
-
+  /**
+    * Type safe index value.
+    */
   case class Index(idx: Int = 0) extends AnyVal with Ordered[Index] {
     def compare(that: Index): Int = idx compare that.idx
     def +(x: Int) = this.copy(idx = idx + 1)
     def -(x: Int) = this.copy(idx = idx - 1)
   }
+
+  /* Election Term */
+  sealed trait Term {
+    def term: Int
+  }
+
+  /* Unique ID of a server */
+  final case class ServerId(id: Int)
 
   /**
     * Index of a log entry.
@@ -38,10 +48,9 @@ object Raft {
   case class Log(index: LogIndex, cmd: RSMCmd) extends Event
 
   /**
-    * Replicated State Machine is a sequence of logs applied
-    * in order.
+    * Logs - sequence of commands applied to be applied in order.
     */
-  case class RSM(
+  case class Logs(
       logs: Array[Log] = Array(),
       committed: LogIndex = LogIndex(),
       applied: LogIndex = LogIndex()
@@ -53,11 +62,6 @@ object Raft {
         logs.last.index
       }
     }
-  }
-
-  /* Current Election Term */
-  sealed trait Term {
-    def term: Int
   }
 
   // The persistent state stored by all servers.
@@ -74,10 +78,13 @@ object Raft {
       case NewTerm(term, votedFor) => Follower(myId, term, votedFor, rsm = rsm)
     }
 
-    def myId: Int = 0
+    /* The unique of the server */
+    def myId: ServerId = ServerId(0)
+
+    /* The current term of this server */
     def currentTerm: Int = 0
 
-    def rsm: RSM = RSM()
+    def rsm: Logs = Logs()
     def getMode: String
 
     /*
@@ -145,10 +152,10 @@ object Raft {
   }
 
   final case class Follower(
-      override val myId: Int,
+      override val myId: ServerId,
       override val currentTerm: Int = 0,
-      votedFor: Option[Int] = None,
-      override val rsm: RSM = RSM()
+      votedFor: Option[ServerId] = None,
+      override val rsm: Logs = Logs()
   ) extends State {
 
     def commandhandler(
@@ -228,11 +235,11 @@ object Raft {
   }
 
   final case class Candidate(
-      override val myId: Int,
+      override val myId: ServerId,
       override val currentTerm: Int = 0,
-      votedFor: Option[Int] = None,
-      votes: Set[Int] = Set(),
-      override val rsm: RSM = RSM()
+      votedFor: Option[ServerId] = None,
+      votes: Set[ServerId] = Set(),
+      override val rsm: Logs = Logs()
   ) extends State {
 
     override def enterMode(
@@ -338,18 +345,18 @@ object Raft {
   }
 
   final case class Leader(
-      override val myId: Int,
+      override val myId: ServerId,
       override val currentTerm: Int,
       override val value: Int = 0,
-      override val rsm: RSM = RSM(),
+      override val rsm: Logs = Logs(),
       clusterSize: Int
   ) extends State {
 
     val prevIndexToSend: Index = rsm.lastLogIndex().index
 
-    val matchIndex: mutable.Map[Int, Index] = mutable.Map()
+    val matchIndex: mutable.Map[ServerId, Index] = mutable.Map()
 
-    val nextIndex: mutable.Map[Int, Index] = mutable.Map()
+    val nextIndex: mutable.Map[ServerId, Index] = mutable.Map()
 
     override def enterMode(
         timers: TimerScheduler[RaftCmd],
@@ -425,7 +432,7 @@ object Raft {
         }
 
       val replicatorRef =
-        context.spawn(replicator(context.self), s"leader$myId-$currentTerm")
+        context.spawn(replicator(context.self), s"leader${myId.id}-$currentTerm")
       clusterConfig.memberRefs.foreach { member =>
         /* TODO: Get prevLog from each member */
         member._2 ! AppendEntries(
@@ -495,33 +502,39 @@ object Raft {
 
   sealed trait Event {}
 
-  final case class NewTerm(term: Int, votedFor: Option[Int] = None)
+  final case class NewTerm(term: Int, votedFor: Option[ServerId] = None)
       extends Event
-  final case class GotVote(term: Int, voters: Int) extends Event
+
+  final case class GotVote(term: Int, voter: ServerId) extends Event
+
   final case class Commit(term: Int, index: Index) extends Event
 
   sealed trait RSMCmd
+
   final case class SettingValue(value: Int) extends RSMCmd
 
   sealed trait RaftCmd
+
   final case class RaftReply(
       term: Int,
-      voter: Int,
-      votedFor: Option[Int],
+      voter: ServerId,
+      votedFor: Option[ServerId],
       result: Boolean
   ) extends RaftCmd
       with Term
+
   final case class RequestVote[Reply](
       term: Int,
-      candidate: Int,
+      candidate: ServerId,
       lastLog: LogIndex,
       override val replyTo: ActorRef[RaftReply]
   ) extends RaftCmd
       with Term
       with ExpectingReply[RaftReply]
+
   final case class AppendEntries[Reply](
       term: Int,
-      leader: Int,
+      leader: ServerId,
       override val replyTo: ActorRef[RaftReply],
       prevLog: LogIndex,
       leaderCommit: LogIndex,
@@ -529,22 +542,28 @@ object Raft {
   ) extends RaftCmd
       with Term
       with ExpectingReply[RaftReply]
+
   final case object HeartbeatTimeout extends RaftCmd
 
   sealed trait ClientProto extends RaftCmd
+
   final case class GetState(replyTo: ActorRef[ClientProto])
       extends ClientProto
       with ExpectingReply[CurrentState]
-  final case class CurrentState(id: Int, term: Int, mode: String)
+
+  final case class CurrentState(id: ServerId, term: Int, mode: String)
       extends ClientProto
 
   sealed trait ClientCmd extends ClientProto
+
   final case class GetValue(replyTo: ActorRef[ClientCmd])
       extends ClientCmd
       with ExpectingReply[ClientCmd]
+
   final case class SetValue(value: Int, replyTo: ActorRef[ClientCmd])
       extends ClientCmd
       with ExpectingReply[ClientCmd]
+
   final case class ValueIs(value: Int) extends ClientCmd
 
   final case class Replicated(index: Index, replyTo: ActorRef[ClientCmd])
@@ -562,11 +581,11 @@ object Raft {
     timers.startSingleTimer(HeartbeatTimeout, HeartbeatTimeout, electionTimeout)
   }
 
-  def apply(id: Option[Int] = None)(
+  def apply(id: Option[ServerId] = None)(
       implicit clusterConfig: Cluster
   ): Behavior[RaftCmd] = Behaviors.setup { context: ActorContext[RaftCmd] =>
-    val myId: Int = id.getOrElse(clusterConfig.myId)
-    val persistenceId = PersistenceId(s"raft-server-typed-$myId")
+    val myId: ServerId = id.getOrElse(clusterConfig.myId)
+    val persistenceId = PersistenceId(s"raft-server-typed-${myId}.id")
 
     Behaviors.withTimers { timers: TimerScheduler[RaftCmd] =>
       EventSourcedBehavior[RaftCmd, Event, State](

@@ -31,13 +31,13 @@ class RaftElectionSpec
     val raftConfig: Config = system.settings.config.getConfig("raft")
     val electionTimeout: FiniteDuration =
       Duration.fromNanos(raftConfig.getDuration("election-timeout").toNanos())
-    var myId: Int = 0
+    var myId: ServerId = ServerId(0)
     implicit var clusterConfig: Cluster = null
 
     before {
       probe = createTestProbe[Raft.ClientProto]()
 
-      myId = (new Random()).nextInt()
+      myId = ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
 
       clusterConfig = Cluster(myId)
     }
@@ -91,8 +91,8 @@ class RaftElectionSpec
       r ! Raft.GetState(probe.ref)
       probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
-      r ! Raft.RequestVote(0, 0, LogIndex(), probe.ref)
-      probe.expectMessage(Raft.RaftReply(0, clusterConfig.myId, Some(0), true))
+      r ! Raft.RequestVote(0, Raft.ServerId(0), LogIndex(), probe.ref)
+      probe.expectMessage(Raft.RaftReply(0, clusterConfig.myId, Some(Raft.ServerId(0)), true))
 
       r ! Raft.GetState(probe.ref)
       probe.expectMessage(
@@ -116,7 +116,7 @@ class RaftElectionSpec
 
       r ! Raft.RequestVote(
         term = 1,
-        candidate = 0,
+        candidate = Raft.ServerId(0),
         LogIndex(),
         replyTo = probe.ref
       )
@@ -145,7 +145,7 @@ class RaftElectionSpec
 
       r ! Raft.RequestVote(
         term = 0,
-        candidate = 0,
+        candidate = Raft.ServerId(0),
         LogIndex(),
         replyTo = probe.ref
       )
@@ -153,7 +153,7 @@ class RaftElectionSpec
         Raft.RaftReply(
           term = 0,
           voter = clusterConfig.myId,
-          votedFor = Some(0),
+          votedFor = Some(Raft.ServerId(0)),
           result = true
         )
       )
@@ -165,7 +165,7 @@ class RaftElectionSpec
 
       r ! Raft.RequestVote(
         term = 0,
-        candidate = 1,
+        candidate = Raft.ServerId(1),
         LogIndex(),
         replyTo = probe.ref
       )
@@ -173,7 +173,7 @@ class RaftElectionSpec
         Raft.RaftReply(
           term = 0,
           voter = clusterConfig.myId,
-          votedFor = Some(0),
+          votedFor = Some(ServerId(0)),
           result = false
         )
       )
@@ -188,7 +188,7 @@ class RaftElectionSpec
 
       r ! Raft.AppendEntries(
         term = 1,
-        leader = 1,
+        leader = Raft.ServerId(1),
         replyTo = probe.ref,
         prevLog = LogIndex(),
         leaderCommit = LogIndex()
@@ -224,7 +224,7 @@ class RaftElectionSpec
 
       r ! Raft.AppendEntries(
         term = 0,
-        leader = 1,
+        leader = Raft.ServerId(1),
         replyTo = probe.ref,
         prevLog = LogIndex(),
         leaderCommit = LogIndex()
@@ -246,8 +246,8 @@ class RaftElectionSpec
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        def otherMembers = Set(20, 30)
-        override def members: Set[Int] = otherMembers + myId
+        def otherMembers = Set(Raft.ServerId(20), Raft.ServerId(30))
+        override def members: Set[ServerId] = otherMembers + myId
 
         override def memberRefs =
           otherMembers.map { member =>
@@ -271,7 +271,7 @@ class RaftElectionSpec
             )
           }.toMap
 
-        override val myId: Int = (new Random()).nextInt()
+        override val myId: ServerId = Raft.ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
       }
 
       val r = spawn(raft.Raft(), "SuccessfulElection")
@@ -321,8 +321,8 @@ class RaftElectionSpec
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        def otherMembers = Set(20)
-        override def members: Set[Int] = otherMembers + myId
+        def otherMembers = Set(ServerId(20))
+        override def members: Set[ServerId] = otherMembers + myId
 
         override def memberRefs =
           otherMembers.map { member =>
@@ -339,7 +339,7 @@ class RaftElectionSpec
             }))
           }.toMap
 
-        override val myId: Int = (new Random()).nextInt()
+        override val myId: ServerId = ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
       }
 
       val r = spawn(raft.Raft())
@@ -373,8 +373,8 @@ class RaftElectionSpec
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        def otherMembers = Set(40, 50)
-        override def members: Set[Int] = otherMembers + myId
+        def otherMembers = Set(ServerId(40), ServerId(50))
+        override def members: Set[ServerId] = otherMembers + myId
 
         override def memberRefs =
           otherMembers.map { member =>
@@ -398,7 +398,7 @@ class RaftElectionSpec
             )
           }.toMap
 
-        override val myId: Int = (new Random()).nextInt()
+        override val myId: ServerId = ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
       }
 
       val r = spawn(raft.Raft())
@@ -431,7 +431,7 @@ class RaftElectionSpec
         t.term shouldBe 1
       }
 
-      r ! Raft.RequestVote(2, 50, LogIndex(), monitorProbe.ref)
+      r ! Raft.RequestVote(2, ServerId(50), LogIndex(), monitorProbe.ref)
 
       eventually(
         timeout(scaled(electionTimeout * 2)),
@@ -452,8 +452,8 @@ class RaftElectionSpec
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        def otherMembers = Set(20, 30)
-        override def members: Set[Int] = otherMembers + myId
+        def otherMembers = Set(ServerId(200), ServerId(300))
+        override def members: Set[ServerId] = otherMembers + myId
 
         override def memberRefs =
           otherMembers.map { member =>
@@ -477,10 +477,10 @@ class RaftElectionSpec
             )
           }.toMap
 
-        override val myId: Int = (new Random()).nextInt()
+        override val myId: ServerId = ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
       }
 
-      val r = spawn(raft.Raft(), "SuccessfulSet")
+      val r = spawn(raft.Raft(), "SuccessSet")
 
       r ! Raft.GetState(probe.ref)
       probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
@@ -520,7 +520,6 @@ class RaftElectionSpec
         t.leader shouldBe clusterConfig.myId
         t.term shouldBe 1
       }
-
       r ! Raft.SetValue(10, probe.ref)
       probe.expectMessage(Raft.ValueIs(10))
 

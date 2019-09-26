@@ -489,6 +489,7 @@ object Raft {
               )
             )
             .thenRun { st: State =>
+              context.log.info(s"Starting quorum for setting value from ${replyTo}: ${v}")
               st match {
                 case s: Leader =>
                   s.sendAppendEntries(timers, context, clusterConfig, replyTo)
@@ -499,7 +500,7 @@ object Raft {
           Effect
             .none
             .thenReply(cmd) { s: State =>
-              context.log.info(s"Replying back to the client: ${s.value}")
+              context.log.debug(s"Replying back to the ${cmd.replyTo}: ${s.value}")
               ValueIs(s.value)
             }
         case _ => Effect.none

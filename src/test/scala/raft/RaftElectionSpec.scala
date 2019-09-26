@@ -521,7 +521,7 @@ class RaftElectionSpec
         t.term shouldBe 1
       }
 
-      def clientprobe = createTestProbe[Raft.ClientCmd]()
+      val clientprobe = createTestProbe[Raft.ClientCmd]()
 
       r ! Raft.SetValue(10, clientprobe.ref)
       clientprobe.expectMessage(Raft.ValueIs(10))

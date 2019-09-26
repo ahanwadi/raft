@@ -10,6 +10,10 @@ import com.typesafe.config.Config
 import scala.collection.{mutable, immutable => im}
 import scala.concurrent.duration.{Duration, FiniteDuration}
 
+/**
+  * We used typed akka and akka persistence to model an Raft server.
+  * We persist each new term, votes, logs and commit of the setvalue.
+  */
 object Raft {
 
   /**
@@ -64,7 +68,7 @@ object Raft {
     }
   }
 
-  // The persistent state stored by all servers.
+  /** The persistent state stored by all servers. */
   sealed trait State {
     def value: Int = 0
 
@@ -84,7 +88,10 @@ object Raft {
     /* The current term of this server */
     def currentTerm: Int = 0
 
+    /* Txn logs for this server */
     def rsm: Logs = Logs()
+
+    /* Whether leader or follower */
     def getMode: String
 
     /*
@@ -100,13 +107,19 @@ object Raft {
       startHeartbeatTimer(timers, context)
     }
 
+    /**
+      * Handles given command in the context of the current state.
+      */
     def commandhandler(
         timers: TimerScheduler[RaftCmd],
         context: ActorContext[RaftCmd],
         clusterConfig: Cluster
     ): CommandHandler[RaftCmd, Raft.Event, Raft.State]
 
-    def defhandler(
+    /**
+      * The default handler for all states.
+      */
+    def defaultHandler(
         timers: TimerScheduler[RaftCmd],
         context: ActorContext[RaftCmd],
         clusterConfig: Cluster
@@ -151,6 +164,9 @@ object Raft {
     }
   }
 
+  /**
+    * Follower
+    */
   final case class Follower(
       override val myId: ServerId,
       override val currentTerm: Int = 0,
@@ -234,6 +250,8 @@ object Raft {
     override def getMode: String = "Follower"
   }
 
+  /** As a candidate solicit and vote in election.
+    * If votes from quorum become a leader or follow a leader */
   final case class Candidate(
       override val myId: ServerId,
       override val currentTerm: Int = 0,
@@ -344,6 +362,8 @@ object Raft {
     override def getMode: String = "Candidate"
   }
 
+  /** As a leader, accept commands from the user, and commit after getting
+    * ack from the quorum */
   final case class Leader(
       override val myId: ServerId,
       override val currentTerm: Int,
@@ -477,7 +497,7 @@ object Raft {
         case cmd @ Replicated(index, _) =>
           context.log.info(s"Committed value - $index")
           Effect
-            .persist(Commit(currentTerm, index))
+            .none
             .thenReply(cmd) { s: State =>
               context.log.info(s"Replying back to the client: ${s.value}")
               ValueIs(s.value)
@@ -523,6 +543,7 @@ object Raft {
   ) extends RaftCmd
       with Term
 
+  /* Request a vote from the members */
   final case class RequestVote[Reply](
       term: Int,
       candidate: ServerId,
@@ -532,6 +553,7 @@ object Raft {
       with Term
       with ExpectingReply[RaftReply]
 
+  /* Append entries to the logs */
   final case class AppendEntries[Reply](
       term: Int,
       leader: ServerId,
@@ -543,18 +565,30 @@ object Raft {
       with Term
       with ExpectingReply[RaftReply]
 
+  /* heartbeat timeout */
   final case object HeartbeatTimeout extends RaftCmd
 
-  sealed trait ClientProto extends RaftCmd
+  /* Base class for all commands and replies
+   * handled in all modes -
+   * for testing (see internal state) as well as
+   * for external requests/replies from the client.
+   */
+  sealed trait TestProto extends RaftCmd
 
-  final case class GetState(replyTo: ActorRef[ClientProto])
-      extends ClientProto
+  /* Used during testing to retrieve current state */
+  final case class GetState(replyTo: ActorRef[TestProto])
+      extends TestProto
       with ExpectingReply[CurrentState]
 
+  /* Used during testing to retrieve current state */
   final case class CurrentState(id: ServerId, term: Int, mode: String)
-      extends ClientProto
+      extends TestProto
 
-  sealed trait ClientCmd extends ClientProto
+  /**
+    * Base class for a external and internal client commands handled by
+    * the leader.
+    */
+  sealed trait ClientCmd extends RaftCmd
 
   final case class GetValue(replyTo: ActorRef[ClientCmd])
       extends ClientCmd
@@ -614,7 +648,7 @@ object Raft {
         }
         val y: Effect[Event, State] =
           state
-            .defhandler(timers, context = context, clusterConfig)
+            .defaultHandler(timers, context = context, clusterConfig)
             .orElse(secondhandler)(cmd)
         y
       }

@@ -26,7 +26,7 @@ class RaftElectionSpec
 
   "Raft Server" must {
 
-    var probe: TestProbe[Raft.ClientProto] = null
+    var probe: TestProbe[TestProto] = null
     val manualTime: ManualTime = ManualTime()
     val raftConfig: Config = system.settings.config.getConfig("raft")
     val electionTimeout: FiniteDuration =
@@ -35,7 +35,7 @@ class RaftElectionSpec
     implicit var clusterConfig: Cluster = null
 
     before {
-      probe = createTestProbe[Raft.ClientProto]()
+      probe = createTestProbe[Raft.TestProto]()
 
       myId = ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
 
@@ -520,11 +520,14 @@ class RaftElectionSpec
         t.leader shouldBe clusterConfig.myId
         t.term shouldBe 1
       }
-      r ! Raft.SetValue(10, probe.ref)
-      probe.expectMessage(Raft.ValueIs(10))
 
-      r ! Raft.GetValue(probe.ref)
-      probe.expectMessage(Raft.ValueIs(10))
+      def clientprobe = createTestProbe[Raft.ClientCmd]()
+
+      r ! Raft.SetValue(10, clientprobe.ref)
+      clientprobe.expectMessage(Raft.ValueIs(10))
+
+      r ! Raft.GetValue(clientprobe.ref)
+      clientprobe.expectMessage(Raft.ValueIs(10))
 
     }
 

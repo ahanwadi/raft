@@ -11,7 +11,7 @@ import scala.collection.{mutable, immutable => im}
 import scala.concurrent.duration.{Duration, FiniteDuration}
 
 /**
-  * We used typed akka and akka persistence to model an Raft server.
+  * We use typed akka and akka persistence to model an Raft server.
   * We persist each new term, votes, logs and commit of the setvalue.
   */
 object Raft {
@@ -31,7 +31,7 @@ object Raft {
   }
 
   /* Unique ID of a server */
-  final case class ServerId(id: Int)
+  final case class ServerId(id: Int) extends AnyVal
 
   /**
     * Index of a log entry.

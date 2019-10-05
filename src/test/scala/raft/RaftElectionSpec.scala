@@ -261,8 +261,10 @@ class RaftElectionSpec
                       case RequestVote(term, candidate, _, replyTo) =>
                         replyTo ! RaftReply(term, member, Some(candidate), true)
                         Behaviors.same
-                      case req: (Term with ExpectingReply[RaftReply]) =>
+                      case req: RaftCmdWithTermExpectingReply =>
                         req.replyTo ! RaftReply(0, member, None, true)
+                        Behaviors.same
+                      case _ =>
                         Behaviors.same
                     }
                   }
@@ -303,14 +305,14 @@ class RaftElectionSpec
 
       eventually(timeout(scaled(electionTimeout)), interval(scaled(1 seconds))) {
         val t =
-          monitorProbe.expectMessageType[Raft.AppendEntries[Raft.RaftReply]]
+          monitorProbe.expectMessageType[Raft.AppendEntries]
         t.leader shouldBe clusterConfig.myId
         t.term shouldBe 1
       }
 
       eventually(timeout(scaled(electionTimeout)), interval(scaled(1 seconds))) {
         val t =
-          monitorProbe.expectMessageType[Raft.AppendEntries[Raft.RaftReply]]
+          monitorProbe.expectMessageType[Raft.AppendEntries]
         t.leader shouldBe clusterConfig.myId
         t.term shouldBe 1
       }
@@ -332,8 +334,10 @@ class RaftElectionSpec
                   case RequestVote(term, candidate, _, replyTo) =>
                     replyTo ! RaftReply(term, member, Some(candidate), true)
                     Behaviors.same
-                  case req: (Term with ExpectingReply[RaftReply]) =>
+                  case req: RaftCmdWithTermExpectingReply =>
                     req.replyTo ! RaftReply(0, member, None, true)
+                    Behaviors.same
+                  case _ =>
                     Behaviors.same
                 }
             }))
@@ -388,8 +392,10 @@ class RaftElectionSpec
                       case RequestVote(term, candidate, _, replyTo) =>
                         replyTo ! RaftReply(term, member, Some(candidate), true)
                         Behaviors.same
-                      case req: (Term with ExpectingReply[RaftReply]) =>
+                      case req: RaftCmdWithTermExpectingReply =>
                         req.replyTo ! RaftReply(0, member, None, true)
+                        Behaviors.same
+                      case _ =>
                         Behaviors.same
                     }
                   }
@@ -426,7 +432,7 @@ class RaftElectionSpec
       /* Should see heartbeats */
       eventually(timeout(scaled(electionTimeout)), interval(scaled(1 seconds))) {
         val t =
-          monitorProbe.expectMessageType[Raft.AppendEntries[Raft.RaftReply]]
+          monitorProbe.expectMessageType[Raft.AppendEntries]
         t.leader shouldBe clusterConfig.myId
         t.term shouldBe 1
       }
@@ -467,8 +473,10 @@ class RaftElectionSpec
                       case RequestVote(term, candidate, _, replyTo) =>
                         replyTo ! RaftReply(term, member, Some(candidate), true)
                         Behaviors.same
-                      case req: (Term with ExpectingReply[RaftReply]) =>
+                      case req: RaftCmdWithTermExpectingReply =>
                         req.replyTo ! RaftReply(req.term, member, None, true)
+                        Behaviors.same
+                      case _ =>
                         Behaviors.same
                     }
                   }
@@ -509,14 +517,14 @@ class RaftElectionSpec
 
       eventually(timeout(scaled(electionTimeout)), interval(scaled(1 seconds))) {
         val t =
-          monitorProbe.expectMessageType[Raft.AppendEntries[Raft.RaftReply]]
+          monitorProbe.expectMessageType[Raft.AppendEntries]
         t.leader shouldBe clusterConfig.myId
         t.term shouldBe 1
       }
 
       eventually(timeout(scaled(electionTimeout)), interval(scaled(1 seconds))) {
         val t =
-          monitorProbe.expectMessageType[Raft.AppendEntries[Raft.RaftReply]]
+          monitorProbe.expectMessageType[Raft.AppendEntries]
         t.leader shouldBe clusterConfig.myId
         t.term shouldBe 1
       }

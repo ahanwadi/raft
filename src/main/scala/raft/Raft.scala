@@ -170,7 +170,7 @@ object Raft {
           .thenReply(cmd) { _ =>
             RaftReply(term, myId, None, true)
           }
-      case cmd: (ExpectingReply[RaftReply] with Term)
+      case cmd: RaftCmdWithTermExpectingReply
           if cmd.term < currentTerm =>
         Effect.reply(cmd)(RaftReply(currentTerm, myId, None, false))
       case e: Term if e.term > currentTerm =>
@@ -517,6 +517,8 @@ object Raft {
               st match {
                 case s: Leader =>
                   s.sendAppendEntries(timers, context, clusterConfig, replyTo)
+                case _ =>
+                  assert(false, "After setting value, raft has to be a leader")
               }
             }
         case cmd @ Replicated(index, _) =>
@@ -543,37 +545,38 @@ object Raft {
     override def getMode: String = "Leader"
   }
 
+  /** base class for all commands exchanged internally between raft servers */
   sealed trait RaftCmd
 
+  sealed trait RaftCmdWithTerm extends RaftCmd with Term
+
+  /** Reply sent in response to all raft commands */
   final case class RaftReply(
       term: Int,
       voter: ServerId,
       votedFor: Option[ServerId],
       result: Boolean
-  ) extends RaftCmd
-      with Term
+  ) extends RaftCmdWithTerm
+
+  sealed trait RaftCmdWithTermExpectingReply extends RaftCmdWithTerm with ExpectingReply[RaftReply]
 
   /* Request a vote from the members */
-  final case class RequestVote[Reply](
+  final case class RequestVote(
       term: Int,
       candidate: ServerId,
       lastLog: LogIndex,
       override val replyTo: ActorRef[RaftReply]
-  ) extends RaftCmd
-      with Term
-      with ExpectingReply[RaftReply]
+  ) extends RaftCmdWithTermExpectingReply
 
   /* Append entries to the logs */
-  final case class AppendEntries[Reply](
+  final case class AppendEntries(
       term: Int,
       leader: ServerId,
       override val replyTo: ActorRef[RaftReply],
       prevLog: LogIndex,
       leaderCommit: LogIndex,
       log: Array[Log] = Array()
-  ) extends RaftCmd
-      with Term
-      with ExpectingReply[RaftReply]
+  ) extends RaftCmdWithTermExpectingReply
 
   /* heartbeat timeout */
   final case object HeartbeatTimeout extends RaftCmd
@@ -600,7 +603,10 @@ object Raft {
     */
   sealed trait ClientCmd extends RaftCmd
 
+  /** Base class for client replies */
   sealed trait ClientReply
+
+  /** Reply for GetValue and SetValue commands */
   final case class ValueIs(value: Int) extends ClientReply
 
   final case class GetValue(replyTo: ActorRef[ClientReply])

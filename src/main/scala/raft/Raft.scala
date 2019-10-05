@@ -12,7 +12,7 @@ import scala.concurrent.duration.{Duration, FiniteDuration}
 
 /**
   * We use typed akka and akka persistence to model an Raft server.
-  * We persist each new term, votes, logs and commit of the setvalue.
+  * We persist each new term, votes, and logs.
   */
 object Raft {
 
@@ -36,7 +36,8 @@ object Raft {
   /**
     * Index of a log entry.
     */
-  case class LogIndex(term: Int = 0, index: Index = Index()) extends Ordered[LogIndex] {
+  case class LogIndex(term: Int = 0, index: Index = Index())
+      extends Ordered[LogIndex] {
     import scala.math.Ordered.orderingToOrdered
 
     def compare(that: LogIndex): Int =
@@ -44,6 +45,22 @@ object Raft {
     def +(x: Index) = this.copy(index = Index(index.idx + x.idx))
     def prev() = this.copy(index = Index(index.idx - 1))
   }
+
+  /** Base class for all commands logged by the Raft server's RSM */
+  sealed trait RSMCmd
+  final case class SettingValue(value: Int) extends RSMCmd
+
+  /** Base class for all events that cause state transition.
+    * Also all events are persisted in a log for recovery
+    */
+  sealed trait Event
+
+  /** New election term */
+  final case class NewTerm(term: Int, votedFor: Option[ServerId] = None)
+      extends Event
+
+  /** A Vote was received */
+  final case class GotVote(term: Int, voter: ServerId) extends Event
 
   /**
     * Each log entry has a sequence number (index) and command
@@ -70,6 +87,8 @@ object Raft {
 
   /** The persistent state stored by all servers. */
   sealed trait State {
+
+    /* The current value. It can be set by SetCmd and re-trived by GetVal */
     def value: Int = 0
 
     def eventHandler(clusterConfig: Cluster, evt: Event): State = evt match {
@@ -410,7 +429,7 @@ object Raft {
         timers: TimerScheduler[RaftCmd],
         context: ActorContext[RaftCmd],
         clusterConfig: Cluster,
-        replyTo: ActorRef[ClientCmd]
+        replyTo: ActorRef[ClientReply]
     ) = {
       /*
        * We have two choices on how to send diff to each member:
@@ -452,7 +471,10 @@ object Raft {
         }
 
       val replicatorRef =
-        context.spawn(replicator(context.self), s"leader${myId.id}-$currentTerm")
+        context.spawn(
+          replicator(context.self),
+          s"leader${myId.id}-$currentTerm"
+        )
       clusterConfig.memberRefs.foreach { member =>
         /* TODO: Get prevLog from each member */
         member._2 ! AppendEntries(
@@ -489,7 +511,9 @@ object Raft {
               )
             )
             .thenRun { st: State =>
-              context.log.info(s"Starting quorum for setting value from ${replyTo}: ${v}")
+              context.log.info(
+                s"Starting quorum for setting value from ${replyTo}: ${v}"
+              )
               st match {
                 case s: Leader =>
                   s.sendAppendEntries(timers, context, clusterConfig, replyTo)
@@ -497,10 +521,11 @@ object Raft {
             }
         case cmd @ Replicated(index, _) =>
           context.log.info(s"Committed value - $index")
-          Effect
-            .none
+          Effect.none
             .thenReply(cmd) { s: State =>
-              context.log.debug(s"Replying back to the ${cmd.replyTo}: ${s.value}")
+              context.log.debug(
+                s"Replying back to the ${cmd.replyTo}: ${s.value}"
+              )
               ValueIs(s.value)
             }
         case _ => Effect.none
@@ -509,30 +534,14 @@ object Raft {
 
     override def eventHandler(clusterConfig: Cluster, evt: Event): State =
       evt match {
-        case cmd @ Log(_, SettingValue(v)) =>
+        case cmd @ Log(idx, SettingValue(v)) =>
           val newLogs = rsm.logs :+ cmd
-          this.copy(value = v, rsm = rsm.copy(logs = newLogs))
-        case Commit(term, index) =>
-          val newCommitIndex = rsm.committed.copy(term = term, index = index)
-          this.copy(rsm = rsm.copy(committed = newCommitIndex))
+          this.copy(value = v, rsm = rsm.copy(logs = newLogs, committed = idx))
         case _ => super.eventHandler(clusterConfig, evt)
       }
 
     override def getMode: String = "Leader"
   }
-
-  sealed trait Event {}
-
-  final case class NewTerm(term: Int, votedFor: Option[ServerId] = None)
-      extends Event
-
-  final case class GotVote(term: Int, voter: ServerId) extends Event
-
-  final case class Commit(term: Int, index: Index) extends Event
-
-  sealed trait RSMCmd
-
-  final case class SettingValue(value: Int) extends RSMCmd
 
   sealed trait RaftCmd
 
@@ -591,19 +600,22 @@ object Raft {
     */
   sealed trait ClientCmd extends RaftCmd
 
-  final case class GetValue(replyTo: ActorRef[ClientCmd])
+  sealed trait ClientReply
+  final case class ValueIs(value: Int) extends ClientReply
+
+  final case class GetValue(replyTo: ActorRef[ClientReply])
       extends ClientCmd
-      with ExpectingReply[ClientCmd]
+      with ExpectingReply[ClientReply]
 
-  final case class SetValue(value: Int, replyTo: ActorRef[ClientCmd])
+  final case class SetValue(value: Int, replyTo: ActorRef[ClientReply])
       extends ClientCmd
-      with ExpectingReply[ClientCmd]
+      with ExpectingReply[ClientReply]
 
-  final case class ValueIs(value: Int) extends ClientCmd
-
-  final case class Replicated(index: Index, replyTo: ActorRef[ClientCmd])
-      extends RaftCmd
-      with ExpectingReply[ClientCmd]
+  private final case class Replicated(
+      index: Index,
+      replyTo: ActorRef[ClientReply]
+  ) extends RaftCmd
+      with ExpectingReply[ClientReply]
 
   def startHeartbeatTimer(
       timers: TimerScheduler[RaftCmd],

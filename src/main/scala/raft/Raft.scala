@@ -191,111 +191,7 @@ object Raft {
           }
       case cmd @ AppendEntries(term, leader, _, prevLog, leaderCommit, logs)
           if term > currentTerm =>
-        context.log.info(s"Got heartbeat from new leader $leader in $term")
-        val prevLogIdx =
-          rsm.logs.indexWhere(x => x.index.index == prevLog.index)
-        if (rsm.logs.length == 0) {
-          if (prevLog.index.idx == 0) {
-            context.log.debug(s"Initiating logs from $leader in $term")
-            val evts = if (logs.isEmpty) Seq(NewTerm(term, Some(leader))) else logs.to(Seq)
-            Effect
-              .persist(evts) // Persists log entries sent by the leader
-              .thenRun { state: State =>
-                state.enterMode(timers, context, clusterConfig)
-              }
-              .thenReply(cmd) { _ =>
-                RaftReply(term, myId, None, true)
-              }
-          } else {
-            context.log.info("Rejecting log entries from $leader at $prevLog")
-            Effect
-              .persist(NewTerm(term, Some(leader)))
-              .thenRun { state: State =>
-                state.enterMode(timers, context, clusterConfig)
-              }
-              .thenReply(cmd) { _ =>
-                RaftReply(term, myId, Some(leader), false)
-              }
-          }
-        } else if (prevLogIdx == -1 || rsm
-                     .logs(prevLogIdx)
-                     .index
-                     .term != prevLog.term) {
-          // Found matching entry to prevLog with the same index and but conflicting term
-          // Reject the AppendEntries request and become a follower.
-          context.log.info("Rejecting log entries from $leader at $prevLog")
-          Effect
-            .persist(NewTerm(term, Some(leader)))
-            .thenRun { state: State =>
-              state.enterMode(timers, context, clusterConfig)
-            }
-            .thenReply(cmd) { _ =>
-              RaftReply(term, myId, Some(leader), false)
-            }
-        } else {
-          /* For index in new logs either:
-           * 1) entry with same index exists in rsm logs.
-           *    If terms conflicts,
-           *    then delete that and all subsequent entries. TODO - how to delete
-           *    conflicting log entry from persistence?
-           *    One option is to take a snapshot by generating a special event
-           *    LogCurtailed(index)
-           *    In the eventHandler we can delete delete all subsequent entries when
-           *    processsing a LogCurtailed event.
-           *    To avoid loading logs previous to the LogCurtailed event on recovery,
-           *    we generate a snapshot using snapshotWhen method.
-           *    Since, we first persist that event and then take the snapshot of the
-           *    resulting state, the snapshot contains the right log entries.
-           *
-           *    else terms match, skip the entry
-           *  2) If new entry, add the list of entry to append.
-           */
-          var idx = prevLogIdx
-          var newidx = 0
-          var conflict = false
-          while (idx < rsm.logs.length && newidx < logs.length && !conflict) {
-            assert(
-              rsm.logs(idx).index.index == logs(newidx).index.index,
-              "logs should be in order"
-            )
-            if (rsm.logs(idx).index.term == logs(newidx).index.term) {
-              // Skip ahead
-              idx += 1
-              newidx += 1
-            } else {
-              // Conflicting entries, delete all logs from this point onwards.
-              conflict = true
-            }
-          }
-          if (idx < rsm.logs.length) {
-            // We need to remove all entries from idx onwards.
-            val evts: im.Seq[Event] = ConflictingEntries(
-              Index(idx),
-              term,
-              Some(leader)
-            ) +: logs.drop(logs.length - newidx).to(Seq)
-            Effect
-              .persist(evts)
-              .thenRun { state: State =>
-                state.enterMode(timers, context, clusterConfig)
-              }
-              .thenReply(cmd) { _ =>
-                RaftReply(term, myId, Some(leader), true)
-              }
-          } else {
-            val evts: im.Seq[Event] = NewTerm(term, Some(leader)) +: logs
-              .drop(logs.length - newidx)
-              .to(Seq)
-            Effect
-              .persist(evts)
-              .thenRun { state: State =>
-                state.enterMode(timers, context, clusterConfig)
-              }
-              .thenReply(cmd) { _ =>
-                RaftReply(term, myId, Some(leader), true)
-              }
-          }
-        }
+        processLogs(timers, context, clusterConfig, cmd)
       case cmd: RaftCmdWithTermExpectingReply
           // Reject all cmds with term less than current term
           if cmd.term < currentTerm =>
@@ -308,6 +204,121 @@ object Raft {
         Effect.none // Ignore stale messages
       case c: GetState =>
         Effect.reply(c)(CurrentState(myId, currentTerm, getMode))
+    }
+
+    def processLogs(
+        timers: TimerScheduler[RaftCmd],
+        context: ActorContext[RaftCmd],
+        clusterConfig: Cluster,
+        cmd: AppendEntries
+    ) = {
+      val AppendEntries(term, leader, _, prevLog, leaderCommit, logs) = cmd
+      context.log.info(s"Got heartbeat from new leader $leader in $term")
+      val prevLogIdx =
+        rsm.logs.indexWhere(x => x.index.index == prevLog.index)
+      if (rsm.logs.length == 0) {
+        if (prevLog.index.idx == 0) {
+          context.log.debug(s"Initiating logs from $leader in $term")
+          val evts =
+            if (logs.isEmpty) Seq(NewTerm(term, Some(leader))) else logs.to(Seq)
+          Effect
+            .persist(evts) // Persists log entries sent by the leader
+            .thenRun { state: State =>
+              state.enterMode(timers, context, clusterConfig)
+            }
+            .thenReply(cmd) { _ =>
+              RaftReply(term, myId, None, true)
+            }
+        } else {
+          context.log.info("Rejecting log entries from $leader at $prevLog")
+          Effect
+            .persist(NewTerm(term, Some(leader)))
+            .thenRun { state: State =>
+              state.enterMode(timers, context, clusterConfig)
+            }
+            .thenReply(cmd) { _ =>
+              RaftReply(term, myId, Some(leader), false)
+            }
+        }
+      } else if (prevLogIdx == -1 || rsm
+                   .logs(prevLogIdx)
+                   .index
+                   .term != prevLog.term) {
+        // Found matching entry to prevLog with the same index and but conflicting term
+        // Reject the AppendEntries request and become a follower.
+        context.log.info("Rejecting log entries from $leader at $prevLog")
+        Effect
+          .persist(NewTerm(term, Some(leader)))
+          .thenRun { state: State =>
+            state.enterMode(timers, context, clusterConfig)
+          }
+          .thenReply(cmd) { _ =>
+            RaftReply(term, myId, Some(leader), false)
+          }
+      } else {
+        /* For index in new logs either:
+         * 1) entry with same index exists in rsm logs.
+         *    If terms conflicts,
+         *    then delete that and all subsequent entries. TODO - how to delete
+         *    conflicting log entry from persistence?
+         *    One option is to take a snapshot by generating a special event
+         *    LogCurtailed(index)
+         *    In the eventHandler we can delete delete all subsequent entries when
+         *    processsing a LogCurtailed event.
+         *    To avoid loading logs previous to the LogCurtailed event on recovery,
+         *    we generate a snapshot using snapshotWhen method.
+         *    Since, we first persist that event and then take the snapshot of the
+         *    resulting state, the snapshot contains the right log entries.
+         *
+         *    else terms match, skip the entry
+         *  2) If new entry, add the list of entry to append.
+         */
+        var idx = prevLogIdx
+        var newidx = 0
+        var conflict = false
+        while (idx < rsm.logs.length && newidx < logs.length && !conflict) {
+          assert(
+            rsm.logs(idx).index.index == logs(newidx).index.index,
+            "logs should be in order"
+          )
+          if (rsm.logs(idx).index.term == logs(newidx).index.term) {
+            // Skip ahead
+            idx += 1
+            newidx += 1
+          } else {
+            // Conflicting entries, delete all logs from this point onwards.
+            conflict = true
+          }
+        }
+        if (idx < rsm.logs.length) {
+          // We need to remove all entries from idx onwards.
+          val evts: im.Seq[Event] = ConflictingEntries(
+            Index(idx),
+            term,
+            Some(leader)
+          ) +: logs.drop(logs.length - newidx).to(Seq)
+          Effect
+            .persist(evts)
+            .thenRun { state: State =>
+              state.enterMode(timers, context, clusterConfig)
+            }
+            .thenReply(cmd) { _ =>
+              RaftReply(term, myId, Some(leader), true)
+            }
+        } else {
+          val evts: im.Seq[Event] = NewTerm(term, Some(leader)) +: logs
+            .drop(logs.length - newidx)
+            .to(Seq)
+          Effect
+            .persist(evts)
+            .thenRun { state: State =>
+              state.enterMode(timers, context, clusterConfig)
+            }
+            .thenReply(cmd) { _ =>
+              RaftReply(term, myId, Some(leader), true)
+            }
+        }
+      }
     }
   }
 
@@ -328,44 +339,13 @@ object Raft {
     ): CommandHandler[RaftCmd, Event, State] = CommandHandler.command {
       case cmd =>
         cmd match {
-          case cmd @ AppendEntries(term, leader, _, _, _, _)
+          case cmd @ AppendEntries(term, leader, _, prevLog, leaderCommit, logs)
               if term == currentTerm =>
-            /* On heartbeat restart the timer, only if heartbeat is for the current term */
-            /* TODO: Do we need to verify if heartbeat is from leader of the current term? */
-            context.log.info(s"Got heartbeat from leader: $leader for $term")
-            Effect.none
-              .thenRun { state: State =>
-                state.enterMode(timers, context, clusterConfig)
-              }
-              .thenReply(cmd) { _ =>
-                RaftReply(term, myId, votedFor, true)
-              }
-          case cmd @ AppendEntries(term, leader, _, prevLog, _, logs)
-              if term == currentTerm =>
-            context.log.info(s"Got logs from leader $leader in $term")
-            /* We assume that leader is sending us only the diff/new logs for the RSM and not
-             * internal leader election events.
-             */
-            val newLogs: im.Seq[Event] = logs.iterator.map(identity).to(Seq)
-            val f = rsm.logs.find(_.index.index == prevLog.index)
-            if (!f.exists { _.index.index == prevLog.index }) {
-              Effect.none.thenReply(cmd) { _ =>
-                RaftReply(term, myId, None, false)
-              }
-            } else if (f.exists(_.index.term != prevLog.term)) {
-              Effect.none.thenReply(cmd) { _ =>
-                RaftReply(term, myId, None, false)
-              }
-            } else {
-              Effect
-                .persist(newLogs)
-                .thenRun { state: State =>
-                  state.enterMode(timers, context, clusterConfig)
-                }
-                .thenReply(cmd) { _ =>
-                  RaftReply(term, myId, None, true)
-                }
+            if (prevLog.index.idx == 0 && logs.length == 0) {
+              context.log.info(s"Got heartbeat from leader: $leader for $term")
             }
+            context.log.info(s"Got logs from leader $leader in $term")
+            processLogs(timers, context, clusterConfig, cmd)
           case HeartbeatTimeout =>
             Effect.persist(NewTerm(currentTerm + 1, Some(myId))).thenRun {
               state =>

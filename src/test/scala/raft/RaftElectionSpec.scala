@@ -84,7 +84,7 @@ class RaftElectionSpec
 
     }
 
-    "should vote if not voted when in follower mode" in {
+    "vote if not voted when in follower mode" in {
       val r = spawn(raft.Raft())
       val probe = createTestProbe[Raft.RaftCmd]()
 
@@ -136,7 +136,7 @@ class RaftElectionSpec
 
     }
 
-    "should not vote if already voted in the current term" in {
+    " not vote if already voted in the current term" in {
       val r = spawn(raft.Raft())
       val probe = createTestProbe[Raft.RaftCmd]()
 
@@ -179,7 +179,7 @@ class RaftElectionSpec
       )
     }
 
-    "should accept newer leader" in {
+    "accept newer leader" in {
       val r = spawn(raft.Raft(), this.suiteName)
       val probe = createTestProbe[Raft.RaftCmd]()
 
@@ -208,7 +208,7 @@ class RaftElectionSpec
       )
     }
 
-    "should reject requests with stale terms" in {
+    " reject requests with stale terms" in {
       val r = spawn(raft.Raft())
       val probe = createTestProbe[Raft.RaftCmd]()
 
@@ -240,7 +240,7 @@ class RaftElectionSpec
 
     }
 
-    "should get elected as leader unanimously" in {
+    " get elected as leader unanimously" in {
 
       val monitorProbe = testKit.createTestProbe[RaftCmd]()
 
@@ -290,7 +290,7 @@ class RaftElectionSpec
         val t = probe.expectMessageType[Raft.CurrentState]
         t.term shouldBe 1
         t.id shouldBe clusterConfig.myId
-        List("Leader", "Candidate") should contain(t.mode)
+        List("Leader", "Candidate")  should contain(t.mode)
       }
 
       eventually(
@@ -319,7 +319,7 @@ class RaftElectionSpec
 
     }
 
-    "leader election should timeout without majority votes" in {
+    "timeout without majority votes in leader role" in {
 
       implicit val clusterConfig: Cluster = new Cluster {
 
@@ -372,7 +372,7 @@ class RaftElectionSpec
 
     }
 
-    "leader should transition to follower on seeing higher term" in {
+    "transition from leader to follower on seeing higher term" in {
       val monitorProbe = testKit.createTestProbe[RaftCmd]()
 
       implicit val clusterConfig: Cluster = new Cluster {
@@ -452,7 +452,7 @@ class RaftElectionSpec
 
     }
 
-    "get should return previously set value" in {
+    "return previously set value" in {
 
       val monitorProbe = testKit.createTestProbe[RaftCmd]()
 
@@ -502,7 +502,7 @@ class RaftElectionSpec
         val t = probe.expectMessageType[Raft.CurrentState]
         t.term shouldBe 1
         t.id shouldBe clusterConfig.myId
-        List("Leader", "Candidate") should contain(t.mode)
+        List("Leader", "Candidate")  should contain(t.mode)
       }
 
       eventually(

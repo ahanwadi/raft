@@ -46,6 +46,26 @@ object Raft {
     def prev() = this.copy(index = Index(index.idx - 1))
   }
 
+  /**
+    * Base class for a external and internal client commands handled by
+    * the leader.
+    */
+  sealed trait ClientCmd extends RaftCmd
+
+  /** Base class for client replies */
+  sealed trait ClientReply
+
+  /** Reply for GetValue and SetValue commands */
+  final case class ValueIs(value: Int) extends ClientReply
+
+  final case class GetValue(replyTo: ActorRef[ClientReply])
+      extends ClientCmd
+      with ExpectingReply[ClientReply]
+
+  final case class SetValue(value: Int, replyTo: ActorRef[ClientReply])
+      extends ClientCmd
+      with ExpectingReply[ClientReply]
+
   /** Base class for all commands logged by the Raft server's RSM */
   sealed trait RSMCmd
   final case class SettingValue(value: Int) extends RSMCmd
@@ -67,6 +87,13 @@ object Raft {
     * associated with it.
     */
   case class Log(index: LogIndex, cmd: RSMCmd) extends Event
+
+  /** Entries in logs that conflict (same index but different term) with leader */
+  case class ConflictingEntries(
+      idx: Index,
+      term: Int,
+      votedFor: Option[ServerId]
+  ) extends Event
 
   /**
     * Logs - sequence of commands applied to be applied in order.
@@ -99,6 +126,13 @@ object Raft {
       case NewTerm(term, votedFor) if votedFor == Some(myId) =>
         Candidate(myId, term, votedFor, rsm = rsm)
       case NewTerm(term, votedFor) => Follower(myId, term, votedFor, rsm = rsm)
+      case ConflictingEntries(Index(idx), term, votedFor) =>
+        Follower(
+          myId,
+          term,
+          votedFor,
+          rsm.copy(logs = rsm.logs.drop(rsm.logs.length - idx))
+        )
     }
 
     /* The unique of the server */
@@ -136,7 +170,7 @@ object Raft {
     ): CommandHandler[RaftCmd, Raft.Event, Raft.State]
 
     /**
-      * The default handler for all states.
+      * The default handler for all server types (modes).
       */
     def defaultHandler(
         timers: TimerScheduler[RaftCmd],
@@ -144,7 +178,9 @@ object Raft {
         clusterConfig: Cluster
     ): PartialFunction[RaftCmd, Effect[Raft.Event, Raft.State]] = {
       case cmd @ RequestVote(term, candidate, _, _) if term > currentTerm =>
-        context.log.info(s"Voting for $candidate in $term")
+        context.log.info(
+          s"Voting for $candidate in $term and transitioning to follower"
+        )
         Effect
           .persist(NewTerm(term, Some(candidate)))
           .thenRun { state: Raft.State =>
@@ -153,31 +189,123 @@ object Raft {
           .thenReply(cmd) { _ =>
             RaftReply(term, myId, Some(candidate), true)
           }
-      case cmd @ AppendEntries(term, leader, _, _, _, logs)
+      case cmd @ AppendEntries(term, leader, _, prevLog, leaderCommit, logs)
           if term > currentTerm =>
         context.log.info(s"Got heartbeat from new leader $leader in $term")
-        /* We assume that leader is sending us only the diff/new logs for the RSM and not
-         * internal leader election events.
-         */
-        val evt: Event = NewTerm(term, None)
-        val newLogs: im.Seq[Event] = logs.iterator.map(identity).to(Seq) ++ im
-          .Seq(evt)
-        Effect
-          .persist(newLogs)
-          .thenRun { state: State =>
-            state.enterMode(timers, context, clusterConfig)
+        val prevLogIdx =
+          rsm.logs.indexWhere(x => x.index.index == prevLog.index)
+        if (rsm.logs.length == 0) {
+          if (prevLog.index.idx == 0) {
+            context.log.debug(s"Initiating logs from $leader in $term")
+            val evts = if (logs.isEmpty) Seq(NewTerm(term, Some(leader))) else logs.to(Seq)
+            Effect
+              .persist(evts) // Persists log entries sent by the leader
+              .thenRun { state: State =>
+                state.enterMode(timers, context, clusterConfig)
+              }
+              .thenReply(cmd) { _ =>
+                RaftReply(term, myId, None, true)
+              }
+          } else {
+            context.log.info("Rejecting log entries from $leader at $prevLog")
+            Effect
+              .persist(NewTerm(term, Some(leader)))
+              .thenRun { state: State =>
+                state.enterMode(timers, context, clusterConfig)
+              }
+              .thenReply(cmd) { _ =>
+                RaftReply(term, myId, Some(leader), false)
+              }
           }
-          .thenReply(cmd) { _ =>
-            RaftReply(term, myId, None, true)
+        } else if (prevLogIdx == -1 || rsm
+                     .logs(prevLogIdx)
+                     .index
+                     .term != prevLog.term) {
+          // Found matching entry to prevLog with the same index and but conflicting term
+          // Reject the AppendEntries request and become a follower.
+          context.log.info("Rejecting log entries from $leader at $prevLog")
+          Effect
+            .persist(NewTerm(term, Some(leader)))
+            .thenRun { state: State =>
+              state.enterMode(timers, context, clusterConfig)
+            }
+            .thenReply(cmd) { _ =>
+              RaftReply(term, myId, Some(leader), false)
+            }
+        } else {
+          /* For index in new logs either:
+           * 1) entry with same index exists in rsm logs.
+           *    If terms conflicts,
+           *    then delete that and all subsequent entries. TODO - how to delete
+           *    conflicting log entry from persistence?
+           *    One option is to take a snapshot by generating a special event
+           *    LogCurtailed(index)
+           *    In the eventHandler we can delete delete all subsequent entries when
+           *    processsing a LogCurtailed event.
+           *    To avoid loading logs previous to the LogCurtailed event on recovery,
+           *    we generate a snapshot using snapshotWhen method.
+           *    Since, we first persist that event and then take the snapshot of the
+           *    resulting state, the snapshot contains the right log entries.
+           *
+           *    else terms match, skip the entry
+           *  2) If new entry, add the list of entry to append.
+           */
+          var idx = prevLogIdx
+          var newidx = 0
+          var conflict = false
+          while (idx < rsm.logs.length && newidx < logs.length && !conflict) {
+            assert(
+              rsm.logs(idx).index.index == logs(newidx).index.index,
+              "logs should be in order"
+            )
+            if (rsm.logs(idx).index.term == logs(newidx).index.term) {
+              // Skip ahead
+              idx += 1
+              newidx += 1
+            } else {
+              // Conflicting entries, delete all logs from this point onwards.
+              conflict = true
+            }
           }
+          if (idx < rsm.logs.length) {
+            // We need to remove all entries from idx onwards.
+            val evts: im.Seq[Event] = ConflictingEntries(
+              Index(idx),
+              term,
+              Some(leader)
+            ) +: logs.drop(logs.length - newidx).to(Seq)
+            Effect
+              .persist(evts)
+              .thenRun { state: State =>
+                state.enterMode(timers, context, clusterConfig)
+              }
+              .thenReply(cmd) { _ =>
+                RaftReply(term, myId, Some(leader), true)
+              }
+          } else {
+            val evts: im.Seq[Event] = NewTerm(term, Some(leader)) +: logs
+              .drop(logs.length - newidx)
+              .to(Seq)
+            Effect
+              .persist(evts)
+              .thenRun { state: State =>
+                state.enterMode(timers, context, clusterConfig)
+              }
+              .thenReply(cmd) { _ =>
+                RaftReply(term, myId, Some(leader), true)
+              }
+          }
+        }
       case cmd: RaftCmdWithTermExpectingReply
+          // Reject all cmds with term less than current term
           if cmd.term < currentTerm =>
         Effect.reply(cmd)(RaftReply(currentTerm, myId, None, false))
       case e: Term if e.term > currentTerm =>
         Effect.persist(NewTerm(e.term)).thenRun { state =>
           state.enterMode(timers, context, clusterConfig)
         }
-      case e: Term if e.term < currentTerm => Effect.none
+      case e: Term if e.term < currentTerm =>
+        Effect.none // Ignore stale messages
       case c: GetState =>
         Effect.reply(c)(CurrentState(myId, currentTerm, getMode))
     }
@@ -558,7 +686,9 @@ object Raft {
       result: Boolean
   ) extends RaftCmdWithTerm
 
-  sealed trait RaftCmdWithTermExpectingReply extends RaftCmdWithTerm with ExpectingReply[RaftReply]
+  sealed trait RaftCmdWithTermExpectingReply
+      extends RaftCmdWithTerm
+      with ExpectingReply[RaftReply]
 
   /* Request a vote from the members */
   final case class RequestVote(
@@ -597,32 +727,13 @@ object Raft {
   final case class CurrentState(id: ServerId, term: Int, mode: String)
       extends TestProto
 
-  /**
-    * Base class for a external and internal client commands handled by
-    * the leader.
-    */
-  sealed trait ClientCmd extends RaftCmd
-
-  /** Base class for client replies */
-  sealed trait ClientReply
-
-  /** Reply for GetValue and SetValue commands */
-  final case class ValueIs(value: Int) extends ClientReply
-
-  final case class GetValue(replyTo: ActorRef[ClientReply])
-      extends ClientCmd
-      with ExpectingReply[ClientReply]
-
-  final case class SetValue(value: Int, replyTo: ActorRef[ClientReply])
-      extends ClientCmd
-      with ExpectingReply[ClientReply]
-
   private final case class Replicated(
       index: Index,
       replyTo: ActorRef[ClientReply]
   ) extends RaftCmd
       with ExpectingReply[ClientReply]
 
+  /** Starts the heartbeat/election timer */
   def startHeartbeatTimer(
       timers: TimerScheduler[RaftCmd],
       context: ActorContext[RaftCmd]
@@ -646,10 +757,14 @@ object Raft {
         emptyState = Follower(myId),
         commandHandler = dispatcher(timers, context, clusterConfig),
         eventHandler = eventHandler(clusterConfig)
-      ).receiveSignal {
-        case (state, RecoveryCompleted) =>
-          state.enterMode(timers, context, clusterConfig)
-      }
+      ).snapshotWhen {
+          case (state, ConflictingEntries(_, _, _), _) => true
+          case _                                       => false
+        }
+        .receiveSignal {
+          case (state, RecoveryCompleted) =>
+            state.enterMode(timers, context, clusterConfig)
+        }
     }
   }
 

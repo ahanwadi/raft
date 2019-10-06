@@ -2,6 +2,9 @@ package raft
 
 import akka.actor.typed.ActorRef
 
+/**
+  * A cluster of raft server, each with an unique ID.
+  */
 trait Cluster {
 
   def myId: Raft.ServerId
@@ -18,6 +21,9 @@ trait Cluster {
 
 }
 
+/**
+  * Default singleton cluster.
+  */
 object Cluster {
   def apply() = new Cluster {
     override def myId = Raft.ServerId(1)

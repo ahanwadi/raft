@@ -191,7 +191,7 @@ class RaftElectionSpec
         leader = Raft.ServerId(1),
         replyTo = probe.ref,
         prevLog = LogIndex(),
-        leaderCommit = LogIndex()
+        leaderCommit = Index()
       )
       probe.expectMessage(
         Raft.RaftReply(
@@ -227,7 +227,7 @@ class RaftElectionSpec
         leader = Raft.ServerId(1),
         replyTo = probe.ref,
         prevLog = LogIndex(),
-        leaderCommit = LogIndex()
+        leaderCommit = Index()
       )
       probe.expectMessage(
         Raft.RaftReply(
@@ -246,7 +246,7 @@ class RaftElectionSpec
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        def otherMembers = Set(Raft.ServerId(20), Raft.ServerId(30))
+        override def otherMembers = Set(Raft.ServerId(20), Raft.ServerId(30))
         override def members: Set[ServerId] = otherMembers + myId
 
         override def memberRefs =
@@ -323,7 +323,7 @@ class RaftElectionSpec
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        def otherMembers = Set(ServerId(20))
+        override def otherMembers = Set(ServerId(20))
         override def members: Set[ServerId] = otherMembers + myId
 
         override def memberRefs =
@@ -377,7 +377,7 @@ class RaftElectionSpec
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        def otherMembers = Set(ServerId(40), ServerId(50))
+        override def otherMembers = Set(ServerId(40), ServerId(50))
         override def members: Set[ServerId] = otherMembers + myId
 
         override def memberRefs =
@@ -458,7 +458,7 @@ class RaftElectionSpec
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        def otherMembers = Set(ServerId(200), ServerId(300))
+        override def otherMembers = Set(ServerId(200), ServerId(300))
         override def members: Set[ServerId] = otherMembers + myId
 
         override def memberRefs =

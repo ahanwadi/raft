@@ -11,6 +11,8 @@ trait Cluster {
 
   def members: Set[Raft.ServerId] = Set(myId)
 
+  def otherMembers: Set[Raft.ServerId] = (members - myId)
+
   def memberRefs: Map[Raft.ServerId, ActorRef[Raft.RaftCmd]] = Map()
 
   def memberRef(id: Raft.ServerId): ActorRef[Raft.RaftCmd] = memberRefs(id)

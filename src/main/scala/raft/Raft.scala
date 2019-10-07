@@ -9,6 +9,7 @@ import com.typesafe.config.Config
 
 import scala.collection.{mutable, immutable => im}
 import scala.concurrent.duration.{Duration, FiniteDuration}
+import raft.Replicator.LogAppended
 
 /**
   * We use typed akka and akka persistence to model an Raft server.
@@ -66,9 +67,14 @@ object Raft {
       extends ClientCmd
       with ExpectingReply[ClientReply]
 
+  // No-op event logged by new leader
+  private final case class NoOp() extends ClientCmd
+
   /** Base class for all commands logged by the Raft server's RSM */
   sealed trait RSMCmd
   final case class SettingValue(value: Int) extends RSMCmd
+
+  private[raft] final case class NoOpCmd() extends RSMCmd
 
   /** Base class for all events that cause state transition.
     * Also all events are persisted in a log for recovery
@@ -100,7 +106,7 @@ object Raft {
     */
   case class Logs(
       logs: Array[Log] = Array(),
-      committed: LogIndex = LogIndex(),
+      committed: Index = Index(),
       applied: LogIndex = LogIndex()
   ) {
     def lastLogIndex(): LogIndex = {
@@ -126,6 +132,7 @@ object Raft {
       case NewTerm(term, votedFor) if votedFor == Some(myId) =>
         Candidate(myId, term, votedFor, rsm = rsm)
       case NewTerm(term, votedFor) => Follower(myId, term, votedFor, rsm = rsm)
+        // TODO - This should be moved to the Follower state
       case ConflictingEntries(Index(idx), term, votedFor) =>
         Follower(
           myId,
@@ -193,8 +200,8 @@ object Raft {
           if term > currentTerm =>
         processLogs(timers, context, clusterConfig, cmd)
       case cmd: RaftCmdWithTermExpectingReply
-          // Reject all cmds with term less than current term
           if cmd.term < currentTerm =>
+          // Reject all cmds with term less than current term
         Effect.reply(cmd)(RaftReply(currentTerm, myId, None, false))
       case e: Term if e.term > currentTerm =>
         Effect.persist(NewTerm(e.term)).thenRun { state =>
@@ -499,20 +506,18 @@ object Raft {
       clusterSize: Int
   ) extends State {
 
-    val prevIndexToSend: Index = rsm.lastLogIndex().index
-
-    val matchIndex: mutable.Map[ServerId, Index] = mutable.Map()
-
-    val nextIndex: mutable.Map[ServerId, Index] = mutable.Map()
-
     override def enterMode(
         timers: TimerScheduler[RaftCmd],
         context: ActorContext[RaftCmd],
         clusterConfig: Cluster
     ) = {
       super.enterMode(timers, context, clusterConfig)
-      context.log.info("Becoming leader - sending heartbeat")
       sendHeartBeat(timers, context, clusterConfig)
+      if (rsm.lastLogIndex().term != currentTerm) {
+        context.log.info(s"${myId} has become leader")
+        // Generate no-op event to trigger log replication
+        context.self ! NoOp()
+      }
     }
 
     def sendHeartBeat(
@@ -530,70 +535,27 @@ object Raft {
           Array[Log]()
         )
       }
-      super.enterMode(timers, context, clusterConfig)
     }
 
+    def replicatorName = s"leader${myId.id}term${currentTerm}"
     def sendAppendEntries(
         timers: TimerScheduler[RaftCmd],
         context: ActorContext[RaftCmd],
         clusterConfig: Cluster,
         replyTo: ActorRef[ClientReply]
     ) = {
-      /*
-       * We have two choices on how to send diff to each member:
-       * 1. We ask the matchIndex from member and then find the delta
-       * 2. We have each memberProxy ask the leader for new diff logs
-       * The problem is leader maintains the logs but member/memberproxy maintains the matchIndex.
-       * We could just always send lastLog entry
-       */
-      def replicator(parent: ActorRef[RaftCmd]): Behavior[RaftReply] =
-        Behaviors.setup[RaftReply] { _ =>
-          def reachedQuroum(): Behavior[RaftReply] = {
-            if (matchIndex.values.filter { x: Index =>
-                  x >= prevIndexToSend
-                }.size >= clusterConfig.quorumSize) {
-              Behavior.stopped { () =>
-                context.log.info(
-                  s"Successful in replication of $prevIndexToSend"
-                )
-                parent ! Replicated(prevIndexToSend, replyTo)
-              }
-            } else {
-              Behavior.same
-            }
-          }
-          Behaviors.receiveMessage {
-            case RaftReply(term, voter, _, result) if term == currentTerm =>
-              if (result) {
-                matchIndex(voter) = prevIndexToSend
-                nextIndex(voter) = prevIndexToSend + 1
-                context.log.info(s"Reach quorum on value in $term")
-                reachedQuroum()
-              } else {
-                // TODO: Resend the AppendEntries with lesser index.
-                nextIndex(voter) = prevIndexToSend - 1
-                Behaviors.same
-              }
-            case _ => Behaviors.unhandled
-          }
-        }
 
-      val replicatorRef =
-        context.spawn(
-          replicator(context.self),
-          s"leader${myId.id}-$currentTerm"
-        )
-      clusterConfig.memberRefs.foreach { member =>
-        /* TODO: Get prevLog from each member */
-        member._2 ! AppendEntries(
-          currentTerm,
-          myId,
-          replicatorRef,
-          rsm.lastLogIndex().prev(),
-          rsm.committed,
-          rsm.logs.take(1)
-        )
-      }
+      val replicatorActr: ActorRef[Replicator.ReplicatorMsg] = context
+        .child(replicatorName)
+        .map(_.unsafeUpcast[Replicator.ReplicatorMsg])
+        .getOrElse({
+          context.spawn(
+            Replicator(currentTerm, context.self, clusterConfig, rsm),
+            replicatorName
+          )
+        })
+      // Send the last log for replication
+      replicatorActr ! LogAppended(rsm.logs.last, replyTo)
     }
 
     override def commandhandler(
@@ -606,10 +568,29 @@ object Raft {
           Effect.none.thenRun { state: Raft.State =>
             sendHeartBeat(timers, context, clusterConfig)
           }
+
+        case NoOp() =>
+          Effect
+            .persist(
+              Log(
+                index = LogIndex(currentTerm, rsm.lastLogIndex().index + 1),
+                cmd = NoOpCmd()
+              )
+            )
+            .thenRun { case st: Leader =>
+              val replicatorActr: ActorRef[Replicator.ReplicatorMsg] =
+                context.spawn(
+                  Replicator(currentTerm, context.self, clusterConfig, st.rsm),
+                  replicatorName
+                )
+              case _ => context.log.error("Invalid state transition")
+            }
+
         case cmd: GetValue =>
           Effect.none.thenReply(cmd) { s: State =>
             ValueIs(s.value)
           }
+
         case SetValue(v, replyTo) =>
           Effect
             .persist(
@@ -629,13 +610,16 @@ object Raft {
                   assert(false, "After setting value, raft has to be a leader")
               }
             }
-        case cmd @ Replicated(index, _) =>
+        case cmd @ ClientReplicated(index, _) =>
           context.log.info(s"Committed value - $index")
           Effect.none
             .thenReply(cmd) { s: State =>
               context.log.debug(
                 s"Replying back to the ${cmd.replyTo}: ${s.value}"
               )
+              /* TODO: We need to calculate value only after applying
+               * log entries after committed
+               */
               ValueIs(s.value)
             }
         case _ => Effect.none
@@ -643,10 +627,14 @@ object Raft {
     }
 
     override def eventHandler(clusterConfig: Cluster, evt: Event): State =
+      // TODO - During replay we need to handle Log events in candidate state
       evt match {
         case cmd @ Log(idx, SettingValue(v)) =>
           val newLogs = rsm.logs :+ cmd
-          this.copy(value = v, rsm = rsm.copy(logs = newLogs, committed = idx))
+          this.copy(value = v, rsm = rsm.copy(logs = newLogs))
+        case cmd @ Log(idx, NoOpCmd()) =>
+          val newLogs = rsm.logs :+ cmd
+          this.copy(rsm = rsm.copy(logs = newLogs))
         case _ => super.eventHandler(clusterConfig, evt)
       }
 
@@ -657,6 +645,15 @@ object Raft {
   sealed trait RaftCmd
 
   sealed trait RaftCmdWithTerm extends RaftCmd with Term
+
+  /** Message indicating a entry at the index should be committed */
+  final case class Committed(index: Index) extends RaftCmd
+
+  final case class ClientReplicated(
+    index: Index,
+    replyTo: ActorRef[ClientReply]
+  ) extends RaftCmd
+      with ExpectingReply[ClientReply]
 
   /** Reply sent in response to all raft commands */
   final case class RaftReply(
@@ -684,7 +681,7 @@ object Raft {
       leader: ServerId,
       override val replyTo: ActorRef[RaftReply],
       prevLog: LogIndex,
-      leaderCommit: LogIndex,
+      leaderCommit: Index,
       log: Array[Log] = Array()
   ) extends RaftCmdWithTermExpectingReply
 
@@ -707,11 +704,6 @@ object Raft {
   final case class CurrentState(id: ServerId, term: Int, mode: String)
       extends TestProto
 
-  private final case class Replicated(
-      index: Index,
-      replyTo: ActorRef[ClientReply]
-  ) extends RaftCmd
-      with ExpectingReply[ClientReply]
 
   /** Starts the heartbeat/election timer */
   def startHeartbeatTimer(

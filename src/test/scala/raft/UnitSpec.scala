@@ -1,7 +1,6 @@
 package raft
 
 import akka.actor.testkit.typed.scaladsl.{ScalaTestWithActorTestKit, TestProbe}
-import org.junit.runner.RunWith
 import org.scalatest.junit.JUnitRunner
 import org.scalatest.{BeforeAndAfter, WordSpecLike}
 import raft.Raft.LogIndex

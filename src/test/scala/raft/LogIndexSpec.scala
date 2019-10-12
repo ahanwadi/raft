@@ -1,12 +1,7 @@
 package raft
 
-import akka.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.{BeforeAndAfter, WordSpecLike}
 import raft.Raft.LogIndex
 
-@RunWith(classOf[JUnitRunner])
 class LogIndexSpec extends UnitSpec() {
 
   "default LogIndex" must {

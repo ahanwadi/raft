@@ -3,14 +3,12 @@ package raft
 import akka.actor.testkit.typed.scaladsl.{
   FishingOutcomes,
   ManualTime,
-  ScalaTestWithActorTestKit,
   TestProbe
 }
+
 import akka.actor.typed.scaladsl.Behaviors
 import akka.persistence.typed.ExpectingReply
 import com.typesafe.config.Config
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.time.SpanSugar._
 import org.scalatest.{BeforeAndAfter, WordSpecLike}
 import raft.Raft._
@@ -18,7 +16,6 @@ import raft.Raft._
 import scala.concurrent.duration.{Duration, FiniteDuration}
 import scala.util.Random
 
-@RunWith(classOf[JUnitRunner])
 class RaftElectionSpec extends UnitSpec() {
 
   "Raft Server" must {

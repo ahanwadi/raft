@@ -89,7 +89,9 @@ class RaftElectionSpec extends UnitSpec() {
       probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
 
       r ! Raft.RequestVote(0, Raft.ServerId(0), LogIndex(), probe.ref)
-      probe.expectMessage(Raft.RaftReply(0, clusterConfig.myId, Some(Raft.ServerId(0)), true))
+      probe.expectMessage(
+        Raft.RaftReply(0, clusterConfig.myId, Some(Raft.ServerId(0)), true)
+      )
 
       r ! Raft.GetState(probe.ref)
       probe.expectMessage(
@@ -250,27 +252,12 @@ class RaftElectionSpec extends UnitSpec() {
           otherMembers.map { member =>
             (
               member,
-              spawn(
-                behavior = Behaviors.monitor(
-                  monitor = monitorProbe.ref,
-                  behavior = Behaviors.receive[Raft.RaftCmd] { (_, cmd) =>
-                    cmd match {
-                      case RequestVote(term, candidate, _, replyTo) =>
-                        replyTo ! RaftReply(term, member, Some(candidate), true)
-                        Behaviors.same
-                      case req: RaftCmdWithTermExpectingReply =>
-                        req.replyTo ! RaftReply(0, member, None, true)
-                        Behaviors.same
-                      case _ =>
-                        Behaviors.same
-                    }
-                  }
-                )
-              )
+              voteYes(member, monitorProbe)
             )
           }.toMap
 
-        override val myId: ServerId = Raft.ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
+        override val myId: ServerId =
+          Raft.ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
       }
 
       val r = spawn(raft.Raft(), "SuccessfulElection")
@@ -287,7 +274,7 @@ class RaftElectionSpec extends UnitSpec() {
         val t = probe.expectMessageType[Raft.CurrentState]
         t.term shouldBe 1
         t.id shouldBe clusterConfig.myId
-        List("Leader", "Candidate")  should contain(t.mode)
+        List("Leader", "Candidate") should contain(t.mode)
       }
 
       eventually(
@@ -323,24 +310,14 @@ class RaftElectionSpec extends UnitSpec() {
         override def otherMembers = Set(ServerId(20))
         override def members: Set[ServerId] = otherMembers + myId
 
+        val monitorProbe = testKit.createTestProbe[RaftCmd]()
         override def memberRefs =
           otherMembers.map { member =>
-            (member, spawn(behavior = Behaviors.receive[Raft.RaftCmd] {
-              (_, cmd) =>
-                cmd match {
-                  case RequestVote(term, candidate, _, replyTo) =>
-                    replyTo ! RaftReply(term, member, Some(candidate), true)
-                    Behaviors.same
-                  case req: RaftCmdWithTermExpectingReply =>
-                    req.replyTo ! RaftReply(0, member, None, true)
-                    Behaviors.same
-                  case _ =>
-                    Behaviors.same
-                }
-            }))
+            (member, voteYes(member, monitorProbe))
           }.toMap
 
-        override val myId: ServerId = ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
+        override val myId: ServerId =
+          ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
       }
 
       val r = spawn(raft.Raft())
@@ -380,28 +357,12 @@ class RaftElectionSpec extends UnitSpec() {
         override def memberRefs =
           otherMembers.map { member =>
             (
-              member,
-              spawn(
-                behavior = Behaviors.monitor(
-                  monitor = monitorProbe.ref,
-                  behavior = Behaviors.receive[Raft.RaftCmd] { (_, cmd) =>
-                    cmd match {
-                      case RequestVote(term, candidate, _, replyTo) =>
-                        replyTo ! RaftReply(term, member, Some(candidate), true)
-                        Behaviors.same
-                      case req: RaftCmdWithTermExpectingReply =>
-                        req.replyTo ! RaftReply(0, member, None, true)
-                        Behaviors.same
-                      case _ =>
-                        Behaviors.same
-                    }
-                  }
-                )
-              )
+              member, voteYes(member, monitorProbe)
             )
           }.toMap
 
-        override val myId: ServerId = ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
+        override val myId: ServerId =
+          ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
       }
 
       val r = spawn(raft.Raft())
@@ -461,28 +422,12 @@ class RaftElectionSpec extends UnitSpec() {
         override def memberRefs =
           otherMembers.map { member =>
             (
-              member,
-              spawn(
-                behavior = Behaviors.monitor(
-                  monitor = monitorProbe.ref,
-                  behavior = Behaviors.receive[Raft.RaftCmd] { (_, cmd) =>
-                    cmd match {
-                      case RequestVote(term, candidate, _, replyTo) =>
-                        replyTo ! RaftReply(term, member, Some(candidate), true)
-                        Behaviors.same
-                      case req: RaftCmdWithTermExpectingReply =>
-                        req.replyTo ! RaftReply(req.term, member, None, true)
-                        Behaviors.same
-                      case _ =>
-                        Behaviors.same
-                    }
-                  }
-                )
-              )
+              member, voteYes(member, monitorProbe)
             )
           }.toMap
 
-        override val myId: ServerId = ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
+        override val myId: ServerId =
+          ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
       }
 
       val r = spawn(raft.Raft(), "SuccessSet")
@@ -499,7 +444,7 @@ class RaftElectionSpec extends UnitSpec() {
         val t = probe.expectMessageType[Raft.CurrentState]
         t.term shouldBe 1
         t.id shouldBe clusterConfig.myId
-        List("Leader", "Candidate")  should contain(t.mode)
+        List("Leader", "Candidate") should contain(t.mode)
       }
 
       eventually(

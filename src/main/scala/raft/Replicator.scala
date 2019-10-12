@@ -66,7 +66,7 @@ object Replicator {
         val followerRef = clusterConfig.memberRef(followerId)
         val prevLogIndex = nextIndexWithDef(followerId) - 1
         val logsToSend =
-          rsm.logs.slice(nextIndexWithDef(followerId).idx, rsm.logs.length)
+          rsm.logs.slice(nextIndexWithDef(followerId).idx - 1, rsm.logs.length)
 
         implicit val timeout: Timeout = 3.seconds
         if (rsm.lastLogIndex().index >= nextIndexWithDef(followerId)) {
@@ -76,7 +76,8 @@ object Replicator {
               currentTerm,
               clusterConfig.myId,
               ref,
-              rsm.logs(prevLogIndex.idx).index,
+              // TODO - Add a method to index into logs
+              if (prevLogIndex.idx == 0) LogIndex(0, prevLogIndex) else rsm.logs(prevLogIndex.idx - 1).index,
               rsm.committed,
               logsToSend
             )
@@ -106,10 +107,10 @@ object Replicator {
          of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N
          */
         val newCommitIndex =
-          ((rsm.logs.length - 1) to minIdx by -1).find { i =>
+          ((rsm.logs.length - 1) to minIdx by -1).find { N =>
             matchIndex.values.count { x: Index =>
-              (x.idx - 1) >= i && rsm.logs(x.idx - 1).index.term == currentTerm
-            } >= quorumSize
+              x.idx >= (N+1) && rsm.logs(N).index.term == currentTerm
+            } >= (quorumSize - 1) // We can assume we have replicated the logs to us
           }
         val logStr = rsm.logs.mkString("\n")
         context.log.debug(s"${logStr} - Committed - ${rsm.committed} - ${newCommitIndex}")
@@ -124,10 +125,10 @@ object Replicator {
         case Replicated(follower, result) =>
           if (result) {
 
-            val matchIdx = matchIndex + (follower -> rsm.lastLogIndex())
+            val matchIdx: Map[ServerId, Index] = matchIndex +(follower -> rsm.lastLogIndex().index)
 
             val leaderCommit =
-              findCommitIndex(rsm, clusterConfig.quorumSize, matchIndex)
+              findCommitIndex(rsm, clusterConfig.quorumSize, matchIdx)
 
             context.log.info(s"Successfully replicated to ${follower} - ${leaderCommit} - ${rsm.lastLogIndex} ")
 
@@ -148,7 +149,7 @@ object Replicator {
               parent,
               clusterConfig,
               rsm.copy(committed = leaderCommit),
-              matchIndex + (follower -> rsm.lastLogIndex().index),
+              matchIdx,
               nextIndex + (follower -> (rsm.lastLogIndex().index + 1)),
               clnts
             )

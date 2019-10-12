@@ -19,10 +19,7 @@ import scala.concurrent.duration.{Duration, FiniteDuration}
 import scala.util.Random
 
 @RunWith(classOf[JUnitRunner])
-class RaftElectionSpec
-    extends ScalaTestWithActorTestKit()
-    with WordSpecLike
-    with BeforeAndAfter {
+class RaftElectionSpec extends UnitSpec() {
 
   "Raft Server" must {
 

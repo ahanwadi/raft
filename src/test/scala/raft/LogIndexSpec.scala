@@ -7,10 +7,7 @@ import org.scalatest.{BeforeAndAfter, WordSpecLike}
 import raft.Raft.LogIndex
 
 @RunWith(classOf[JUnitRunner])
-class LogIndexSpec
-    extends ScalaTestWithActorTestKit()
-    with WordSpecLike
-    with BeforeAndAfter {
+class LogIndexSpec extends UnitSpec() {
 
   "default LogIndex" must {
     "up-to-date with itself" in {

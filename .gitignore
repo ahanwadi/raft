@@ -8,3 +8,10 @@
 /.metals/
 /.bloop/
 /bin/
+/.DS_Store
+/.classpath
+/.java-version
+/.project
+/.settings/
+/src/main/scala/.DS_Store
+/src/test/scala/.DS_Store

@@ -1,14 +1,8 @@
 package raft
 
 import akka.actor.testkit.typed.scaladsl.{ScalaTestWithActorTestKit, TestProbe}
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.{BeforeAndAfter, WordSpecLike}
-import raft.Raft.LogIndex
-
 import akka.actor.typed.scaladsl.Behaviors
-import akka.persistence.typed.ExpectingReply
-import com.typesafe.config.Config
-
+import org.scalatest.{BeforeAndAfter, WordSpecLike}
 import raft.Raft._
 
 abstract class UnitSpec

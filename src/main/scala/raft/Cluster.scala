@@ -11,7 +11,7 @@ trait Cluster {
 
   def members: Set[Raft.ServerId] = Set(myId)
 
-  def otherMembers: Set[Raft.ServerId] = (members - myId)
+  def otherMembers: Set[Raft.ServerId] = members - myId
 
   def memberRefs: Map[Raft.ServerId, ActorRef[Raft.RaftCmd]] = Map()
 
@@ -27,11 +27,11 @@ trait Cluster {
   * Default singleton cluster.
   */
 object Cluster {
-  def apply() = new Cluster {
-    override def myId = Raft.ServerId(1)
+  def apply(): Cluster = new Cluster {
+    override def myId: Raft.ServerId = Raft.ServerId(1)
   }
 
-  def apply(id: Raft.ServerId) = new Cluster {
-    override def myId = id
+  def apply(id: Raft.ServerId): Cluster = new Cluster {
+    override def myId: Raft.ServerId = id
   }
 }

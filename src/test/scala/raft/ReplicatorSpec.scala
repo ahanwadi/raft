@@ -1,18 +1,7 @@
 package raft
 
-import akka.actor.testkit.typed.scaladsl.{
-  FishingOutcomes,
-  ManualTime,
-  TestProbe
-}
-
-import akka.actor.typed.scaladsl.Behaviors
-import akka.persistence.typed.ExpectingReply
-import com.typesafe.config.Config
-import org.scalatest.time.SpanSugar._
 import raft.Raft._
 
-import scala.concurrent.duration.{Duration, FiniteDuration}
 import scala.util.Random
 
 class ReplicatorSpec extends UnitSpec() {
@@ -40,9 +29,9 @@ class ReplicatorSpec extends UnitSpec() {
           Raft.ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
       }
 
-      val noOpCmd = Log(LogIndex(1, Index(1)), NoOpCmd())
+      val noOpCmd = Log(1, NoOpCmd())
       val r = spawn(
-        Replicator(1, monitorProbe.ref, clusterConfig, Logs(Array(noOpCmd))),
+        Replicator(1, monitorProbe.ref, clusterConfig, Logs(Index(0), Array(noOpCmd))),
         "SuccessfulElection"
       )
 

@@ -1,14 +1,10 @@
 package raft
 
-import akka.actor.typed.ActorSystem
-import akka.actor.typed.ActorRef
-import akka.actor.typed.Behavior
-import akka.actor.typed.scaladsl.AbstractBehavior
-import akka.actor.typed.scaladsl.ActorContext
 import akka.actor.typed.scaladsl.Behaviors
-import raft.Raft._
-import raft.Cluster
+import akka.actor.typed.{ActorRef, Behavior}
 import akka.util.Timeout
+import raft.Raft._
+
 import scala.concurrent.duration._
 import scala.util._
 
@@ -26,11 +22,11 @@ object Replicator {
   final case class LogAppended(entry: Log, client: ActorRef[ClientReply]) extends ReplicatorMsg
 
   def apply(
-      currentTerm: Int,
-      parent: ActorRef[RaftCmd],
-      clusterConfig: Cluster,
-      rsm: Logs
-  ) = replicator(currentTerm, parent, clusterConfig, rsm)
+             currentTerm: Int,
+             parent: ActorRef[RaftCmd],
+             clusterConfig: Cluster,
+             rsm: Logs
+           ): Behavior[ReplicatorMsg] = replicator(currentTerm, parent, clusterConfig, rsm)
 
   /*
    * Replicator is started when a leader is elected. On startup, it replicates a no-op entry
@@ -70,24 +66,24 @@ object Replicator {
 
         implicit val timeout: Timeout = 3.seconds
         if (rsm.lastLogIndex().index >= nextIndexWithDef(followerId)) {
-          context.log.info(s"Replicating to ${followerId} at ${prevLogIndex}")
-          context.ask(followerRef) { ref =>
+          context.log.info(s"Replicating to $followerId at $prevLogIndex")
+          context.ask(target = followerRef) { ref: ActorRef[RaftReply] =>
             AppendEntries(
               currentTerm,
               clusterConfig.myId,
-              ref,
+              replyTo = ref,
               // TODO - Add a method to index into logs
-              if (prevLogIndex.idx == 0) LogIndex(0, prevLogIndex) else rsm.logs(prevLogIndex.idx - 1).index,
-              rsm.committed,
-              logsToSend
+              prevLog = if (prevLogIndex.idx == 0) LogIndex(0, prevLogIndex) else rsm.lastLogIndex(),
+              leaderCommit = rsm.committed,
+              log = logsToSend
             )
           } {
-            case Success(RaftReply(currentTerm, followerId, _, result)) =>
+            case Success(RaftReply(_, followerId, _, result)) =>
               Replicated(followerId, result)
-            case Failure(x) => ReplicationTimeout(followerId)
+            case Failure(_) => ReplicationTimeout(followerId)
           }
         } else {
-          context.log.info(s"Skipping replicating to ${followerId} at ${prevLogIndex}")
+          context.log.info(s"""Skipping replicating to $followerId at $prevLogIndex""")
         }
       }
 
@@ -109,15 +105,15 @@ object Replicator {
         val newCommitIndex =
           ((rsm.logs.length - 1) to minIdx by -1).find { N =>
             matchIndex.values.count { x: Index =>
-              x.idx >= (N+1) && rsm.logs(N).index.term == currentTerm
+              x.idx >= (N + 1) && rsm.logs(N).term == currentTerm
             } >= (quorumSize - 1) // We can assume we have replicated the logs to us
           }
         val logStr = rsm.logs.mkString("\n")
-        context.log.debug(s"${logStr} - Committed - ${rsm.committed} - ${newCommitIndex}")
+        context.log.debug(s"$logStr - Committed - ${rsm.committed} - $newCommitIndex")
         if (newCommitIndex.isDefined) {
-          return Index(newCommitIndex.get + 1)
+          Index(newCommitIndex.get + 1)
         } else {
-          return rsm.committed
+          rsm.committed
         }
       }
 
@@ -130,7 +126,7 @@ object Replicator {
             val leaderCommit =
               findCommitIndex(rsm, clusterConfig.quorumSize, matchIdx)
 
-            context.log.info(s"Successfully replicated to ${follower} - ${leaderCommit} - ${rsm.lastLogIndex} ")
+            context.log.info(s"""Successfully replicated to $follower - $leaderCommit - ${rsm.lastLogIndex} """)
 
             val clnts = clients filter { case (index, client) =>
               val done = leaderCommit >= (index - 1)
@@ -170,7 +166,7 @@ object Replicator {
           Behavior.same
 
         case LogAppended(entry, client) =>
-          context.log.info(s"Appending ${entry}")
+          context.log.info(s"Appending $entry")
           replicator(
             currentTerm,
             parent,
@@ -178,7 +174,7 @@ object Replicator {
             rsm.copy(logs = rsm.logs :+ entry),
             matchIndex,
             nextIndex.withDefaultValue(rsm.lastLogIndex().index),
-            clients + (entry.index.index -> client)
+            clients + (rsm.lastLogIndex().index -> client)
           )
         case _ => Behaviors.unhandled
       }

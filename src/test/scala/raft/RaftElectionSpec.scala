@@ -1,19 +1,13 @@
 package raft
 
-import akka.actor.testkit.typed.scaladsl.{
-  FishingOutcomes,
-  ManualTime,
-  TestProbe
-}
-
-import akka.actor.typed.scaladsl.Behaviors
-import akka.persistence.typed.ExpectingReply
+import akka.actor.testkit.typed.scaladsl.{FishingOutcomes, ManualTime, TestProbe}
+import akka.actor.typed.ActorRef
 import com.typesafe.config.Config
 import org.scalatest.time.SpanSugar._
-import org.scalatest.{BeforeAndAfter, WordSpecLike}
 import raft.Raft._
 
 import scala.concurrent.duration.{Duration, FiniteDuration}
+import scala.language.postfixOps
 import scala.util.Random
 
 class RaftElectionSpec extends UnitSpec() {
@@ -24,14 +18,14 @@ class RaftElectionSpec extends UnitSpec() {
     val manualTime: ManualTime = ManualTime()
     val raftConfig: Config = system.settings.config.getConfig("raft")
     val electionTimeout: FiniteDuration =
-      Duration.fromNanos(raftConfig.getDuration("election-timeout").toNanos())
+      Duration.fromNanos(raftConfig.getDuration("election-timeout").toNanos)
     var myId: ServerId = ServerId(0)
     implicit var clusterConfig: Cluster = null
 
     before {
       probe = createTestProbe[Raft.TestProto]()
 
-      myId = ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
+      myId = ServerId(new Random().nextInt() & Integer.MAX_VALUE)
 
       clusterConfig = Cluster(myId)
     }
@@ -83,11 +77,11 @@ class RaftElectionSpec extends UnitSpec() {
       val probe = createTestProbe[Raft.RaftCmd]()
 
       r ! Raft.GetState(probe.ref)
-      probe.expectMessage(Raft.CurrentState(clusterConfig.myId, 0, "Follower"))
+      probe.expectMessage(Raft.CurrentState(id = clusterConfig.myId, term = 0, mode = "Follower"))
 
-      r ! Raft.RequestVote(0, Raft.ServerId(0), LogIndex(), probe.ref)
+      r ! Raft.RequestVote(term = 0, candidate = Raft.ServerId(0), lastLog = LogIndex(), replyTo = probe.ref)
       probe.expectMessage(
-        Raft.RaftReply(0, clusterConfig.myId, Some(Raft.ServerId(0)), true)
+        Raft.RaftReply(term = 0, voter = clusterConfig.myId, votedFor = Some(Raft.ServerId(0)), result = true)
       )
 
       r ! Raft.GetState(probe.ref)
@@ -193,7 +187,7 @@ class RaftElectionSpec extends UnitSpec() {
         Raft.RaftReply(
           term = 1,
           voter = clusterConfig.myId,
-          votedFor = None,
+          votedFor = Some(ServerId(1)),
           result = true
         )
       )
@@ -245,7 +239,7 @@ class RaftElectionSpec extends UnitSpec() {
         override def otherMembers = Set(Raft.ServerId(20), Raft.ServerId(30))
         override def members: Set[ServerId] = otherMembers + myId
 
-        override def memberRefs =
+        override def memberRefs: Map[ServerId, ActorRef[RaftCmd]] =
           otherMembers.map { member =>
             (
               member,
@@ -253,8 +247,9 @@ class RaftElectionSpec extends UnitSpec() {
             )
           }.toMap
 
-        override val myId: ServerId =
-          Raft.ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
+        override val myId: ServerId = {
+          Raft.ServerId(new Random().nextInt() & Integer.MAX_VALUE)
+        }
       }
 
       val r = spawn(raft.Raft(), "SuccessfulElection")
@@ -307,14 +302,15 @@ class RaftElectionSpec extends UnitSpec() {
         override def otherMembers = Set(ServerId(20))
         override def members: Set[ServerId] = otherMembers + myId
 
-        val monitorProbe = testKit.createTestProbe[RaftCmd]()
-        override def memberRefs =
+        val monitorProbe: TestProbe[RaftCmd] = testKit.createTestProbe[RaftCmd]()
+        override def memberRefs: Map[ServerId, ActorRef[RaftCmd]] =
           otherMembers.map { member =>
             (member, voteYes(member, monitorProbe))
           }.toMap
 
-        override val myId: ServerId =
-          ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
+        override val myId: ServerId = {
+          ServerId(new Random().nextInt() & Integer.MAX_VALUE)
+        }
       }
 
       val r = spawn(raft.Raft())
@@ -351,15 +347,16 @@ class RaftElectionSpec extends UnitSpec() {
         override def otherMembers = Set(ServerId(40), ServerId(50))
         override def members: Set[ServerId] = otherMembers + myId
 
-        override def memberRefs =
+        override def memberRefs: Map[ServerId, ActorRef[RaftCmd]] =
           otherMembers.map { member =>
             (
               member, voteYes(member, monitorProbe)
             )
           }.toMap
 
-        override val myId: ServerId =
-          ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
+        override val myId: ServerId = {
+          ServerId(new Random().nextInt() & Integer.MAX_VALUE)
+        }
       }
 
       val r = spawn(raft.Raft())
@@ -373,15 +370,13 @@ class RaftElectionSpec extends UnitSpec() {
         case Raft.CurrentState(id, term, _)
             if term != 1 || id != clusterConfig.myId =>
           FishingOutcomes.fail("Got message with wrong term or id")
-        case Raft.CurrentState(_, _, "Candidate") => {
+        case Raft.CurrentState(_, _, "Candidate") =>
           r ! Raft.GetState(probe.ref)
           FishingOutcomes.continue
-        }
         case Raft.CurrentState(_, _, "Leader") => FishingOutcomes.complete
-        case _ => {
+        case _ =>
           r ! Raft.GetState(probe.ref)
           FishingOutcomes.continueAndIgnore
-        }
       }
 
       /* Should see heartbeats */
@@ -416,15 +411,16 @@ class RaftElectionSpec extends UnitSpec() {
         override def otherMembers = Set(ServerId(200), ServerId(300))
         override def members: Set[ServerId] = otherMembers + myId
 
-        override def memberRefs =
+        override def memberRefs: Map[ServerId, ActorRef[RaftCmd]] =
           otherMembers.map { member =>
             (
               member, voteYes(member, monitorProbe)
             )
           }.toMap
 
-        override val myId: ServerId =
-          ServerId((new Random()).nextInt() & Integer.MAX_VALUE)
+        override val myId: ServerId = {
+          ServerId(new Random().nextInt() & Integer.MAX_VALUE)
+        }
       }
 
       val r = spawn(raft.Raft(), "SuccessSet")

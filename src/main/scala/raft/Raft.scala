@@ -5,7 +5,7 @@ import akka.actor.typed.{ActorRef, Behavior}
 import akka.persistence.typed.scaladsl.Effect.reply
 import akka.persistence.typed.scaladsl.EventSourcedBehavior.CommandHandler
 import akka.persistence.typed.scaladsl.{Effect, EventSourcedBehavior, ReplyEffect}
-import akka.persistence.typed.{ExpectingReply, PersistenceId, RecoveryCompleted}
+import akka.persistence.typed.{PersistenceId, RecoveryCompleted}
 import com.typesafe.config.Config
 import raft.Replicator.LogAppended
 
@@ -34,7 +34,7 @@ object Raft {
     implicit clusterConfig: Cluster
   ): Behavior[RaftCmd] = Behaviors.setup { context: ActorContext[RaftCmd] =>
     val myId: ServerId = id.getOrElse(clusterConfig.myId)
-    val persistenceId = PersistenceId(s"raft-server-typed-$myId.id")
+    val persistenceId = PersistenceId.ofUniqueId(s"raft-server-typed-$myId.id")
 
     Behaviors.withTimers { timers: TimerScheduler[RaftCmd] =>
       EventSourcedBehavior[RaftCmd, Event, State](
@@ -163,14 +163,14 @@ object Raft {
           .thenRun { state: Raft.State =>
             state.enterMode(timers, context, clusterConfig)
           }
-          .thenReply(cmd) { _ =>
+          .thenReply(cmd.replyTo) { _ =>
             RaftReply(term, myId, Some(candidate), result = true)
           }
       case cmd@AppendEntries(term, _, _, _, _, _) if term > currentTerm =>
         processLogs(timers, context, clusterConfig, cmd)
       case cmd: RaftCmdWithTermExpectingReply if cmd.term < currentTerm =>
         // Reject all commands with term less than current term
-        reply(cmd)(RaftReply(currentTerm, myId, None, result = false))
+        reply(cmd.replyTo)(RaftReply(currentTerm, myId, None, result = false))
       case e: Term if e.term > currentTerm =>
         Effect.persist(NewTerm(e.term)).thenRun { state =>
           state.enterMode(timers, context, clusterConfig)
@@ -178,7 +178,7 @@ object Raft {
       case e: Term if e.term < currentTerm =>
         Effect.none // Ignore stale messages
       case c: GetState =>
-        reply(c)(CurrentState(myId, currentTerm, getMode))
+        reply(c.replyTo)(CurrentState(myId, currentTerm, getMode))
     }
 
     /* The current term of this server */
@@ -222,7 +222,7 @@ object Raft {
           .thenRun { state: State =>
             state.enterMode(timers, context, clusterConfig)
           }
-          .thenReply(cmd) { _ =>
+          .thenReply(cmd.replyTo) { _ =>
             RaftReply(term, myId, Some(leader), result = true)
           }
       }
@@ -234,13 +234,13 @@ object Raft {
           // Found matching entry to prevLog with the same index and but conflicting term
           // Reject the AppendEntries request and become a follower.
           context.log.info("Rejecting log entries from $leader at $prevLog")
-          reply(cmd)(RaftReply(term, myId, Some(leader), result = false))
+          reply(cmd.replyTo)(RaftReply(term, myId, Some(leader), result = false))
         } else {
           acceptLogs
         }
       } else {
         context.log.info("Rejecting log entries from $leader at $prevLog")
-        reply(cmd)(RaftReply(term, myId, Some(leader), result = false))
+        reply(cmd.replyTo)(RaftReply(term, myId, Some(leader), result = false))
       }
     }
 
@@ -262,6 +262,10 @@ object Raft {
   sealed trait RaftCmd extends Any
 
   sealed trait RaftCmdWithTerm extends RaftCmd with Term
+
+  sealed trait ExpectingReply[Reply] {
+    def replyTo: ActorRef[Reply]
+  }
 
   sealed trait RaftCmdWithTermExpectingReply
     extends RaftCmdWithTerm
@@ -383,16 +387,16 @@ object Raft {
           .thenRun { state: Raft.State =>
             state.enterMode(timers, context, clusterConfig)
           }
-          .thenReply(cmd) { _ =>
+          .thenReply(cmd.replyTo) { _ =>
             RaftReply(term, myId, Some(candidate), result = true)
           }
       case cmd@RequestVote(term, _, _, _) =>
-        context.log.info(s"Rejecting vote in $term - ${rsm.logs.lastOption} - ${rsm.lastLogIndex}")
+        context.log.info(s"Rejecting vote in $term - ${rsm.logs.lastOption} - ${rsm.lastLogIndex()}")
         Effect.none
           .thenRun { state: Raft.State =>
             state.enterMode(timers, context, clusterConfig)
           }
-          .thenReply(cmd) { _ =>
+          .thenReply(cmd.replyTo) { _ =>
             RaftReply(term, myId, votedFor, result = false)
           }
       case _ => Effect.unhandled
@@ -464,7 +468,7 @@ object Raft {
           .thenRun { state: State =>
             state.enterMode(timers, context, clusterConfig)
           }
-          .thenReply(cmd) { _ =>
+          .thenReply(cmd.replyTo) { _ =>
             RaftReply(term, myId, votedFor, result = true)
           }
       case cmd@RequestVote(term, candidate, lastLog, _)
@@ -477,7 +481,7 @@ object Raft {
           .thenRun { state: Raft.State =>
             state.enterMode(timers, context, clusterConfig)
           }
-          .thenReply(cmd) { _ =>
+          .thenReply(cmd.replyTo) { _ =>
             RaftReply(term, myId, Some(candidate), result = true)
           }
       case cmd@RequestVote(term, _, _, _) =>
@@ -485,7 +489,7 @@ object Raft {
           .thenRun { state: Raft.State =>
             state.enterMode(timers, context, clusterConfig)
           }
-          .thenReply(cmd) { _ =>
+          .thenReply(cmd.replyTo) { _ =>
             context.log.info(
               s"Rejecting vote in the same term - $term ($currentTerm) as a candidate"
             )
@@ -583,7 +587,7 @@ object Raft {
           }
 
       case cmd: GetValue =>
-        Effect.none.thenReply(cmd) { s: State =>
+        Effect.none.thenReply(cmd.replyTo) { s: State =>
           ValueIs(s.value)
         }
 
@@ -612,7 +616,7 @@ object Raft {
       case cmd@ClientReplicated(index, _) =>
         context.log.info(s"Committed value - $index")
         Effect.none
-          .thenReply(cmd) { s: State =>
+          .thenReply(cmd.replyTo) { s: State =>
             context.log.debug(
               s"Replying back to the ${cmd.replyTo}: ${s.value}"
             )

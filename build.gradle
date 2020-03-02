@@ -3,12 +3,12 @@ plugins {
     id "com.github.maiflai.scalatest" version "0.25"
 }
 
-ext.scalaVersion = '2.13.0'
-ext.akka_version = '2.5.25'
+ext.scalaVersion = '2.13.1'
+ext.akka_version = '2.6.3'
 
 repositories {
-  mavenCentral()
   jcenter()
+  mavenCentral()
 }
 
 dependencies {
@@ -17,16 +17,16 @@ dependencies {
 
   implementation group: 'ch.qos.logback', name: 'logback-classic', version: '1.2.3'
 
-  implementation group: 'com.typesafe.akka', name: 'akka-slf4j_2.13', version: akka_version
   implementation group: 'com.typesafe.akka', name: 'akka-persistence-typed_2.13', version: akka_version
+  implementation group: 'com.typesafe.akka', name: 'akka-serialization-jackson_2.13', version: akka_version
 
   implementation group: 'org.iq80.leveldb', name: 'leveldb', version: '0.7'
   implementation group: 'org.fusesource.leveldbjni', name: 'leveldbjni-all', version: '1.8'
 
-  testImplementation group: 'org.scalatest', name: 'scalatest_2.13', version: '3.0.8'
+  testImplementation group: 'org.scalatest', name: 'scalatest_2.13', version: '3.1.0'
 
-  testImplementation group: 'com.typesafe.akka', name: 'akka-actor-testkit-typed_2.13', version: '2.5.25'
+  testImplementation group: 'com.typesafe.akka', name: 'akka-actor-testkit-typed_2.13', version: akka_version
 
-  testRuntime 'org.pegdown:pegdown:1.4.2'
+  testRuntime 'com.vladsch.flexmark:flexmark-all:0.35.10'
 
 }

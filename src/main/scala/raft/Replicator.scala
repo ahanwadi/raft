@@ -67,7 +67,7 @@ object Replicator {
         implicit val timeout: Timeout = 3.seconds
         if (rsm.lastLogIndex().index >= nextIndexWithDef(followerId)) {
           context.log.info(s"Replicating to $followerId at $prevLogIndex")
-          context.ask(target = followerRef) { ref: ActorRef[RaftReply] =>
+          context.ask (followerRef, { ref: ActorRef[RaftReply] =>
             AppendEntries(
               currentTerm,
               clusterConfig.myId,
@@ -77,7 +77,7 @@ object Replicator {
               leaderCommit = rsm.committed,
               log = logsToSend
             )
-          } {
+          }) {
             case Success(RaftReply(_, followerId, _, result)) =>
               Replicated(followerId, result)
             case Failure(_) => ReplicationTimeout(followerId)
@@ -126,7 +126,7 @@ object Replicator {
             val leaderCommit =
               findCommitIndex(rsm, clusterConfig.quorumSize, matchIdx)
 
-            context.log.info(s"""Successfully replicated to $follower - $leaderCommit - ${rsm.lastLogIndex} """)
+            context.log.info(s"""Successfully replicated to $follower - $leaderCommit - ${rsm.lastLogIndex()} """)
 
             val clnts = clients filter { case (index, client) =>
               val done = leaderCommit >= (index - 1)
@@ -163,7 +163,7 @@ object Replicator {
         case ReplicationTimeout(follower) =>
           // Try sending AppendEntries to the follower on timeout
           sendAppendEntries(follower)
-          Behavior.same
+          Behaviors.same
 
         case LogAppended(entry, client) =>
           context.log.info(s"Appending $entry")

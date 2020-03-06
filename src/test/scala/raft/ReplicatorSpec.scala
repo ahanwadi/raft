@@ -15,11 +15,11 @@ class ReplicatorSpec extends UnitSpec() {
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        override def otherMembers = Set(Raft.ServerId(80))
-        override def members: Set[ServerId] = otherMembers + myId
+        override def peers = Set(Raft.ServerId(80))
+        override def members: Set[ServerId] = peers + myId
 
         override def memberRefs: Map[ServerId, ActorRef[RaftCmd]] =
-          otherMembers.map { member =>
+          peers.map { member =>
             (
               member,
               voteYes(member, monitorProbe)

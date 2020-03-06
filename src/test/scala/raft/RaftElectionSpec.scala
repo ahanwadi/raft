@@ -236,11 +236,11 @@ class RaftElectionSpec extends UnitSpec() {
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        override def otherMembers = Set(Raft.ServerId(20), Raft.ServerId(30))
-        override def members: Set[ServerId] = otherMembers + myId
+        override def peers = Set(Raft.ServerId(20), Raft.ServerId(30))
+        override def members: Set[ServerId] = peers + myId
 
         override def memberRefs: Map[ServerId, ActorRef[RaftCmd]] =
-          otherMembers.map { member =>
+          peers.map { member =>
             (
               member,
               voteYes(member, monitorProbe)
@@ -299,12 +299,12 @@ class RaftElectionSpec extends UnitSpec() {
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        override def otherMembers = Set(ServerId(20))
-        override def members: Set[ServerId] = otherMembers + myId
+        override def peers = Set(ServerId(20))
+        override def members: Set[ServerId] = peers + myId
 
         val monitorProbe: TestProbe[RaftCmd] = testKit.createTestProbe[RaftCmd]()
         override def memberRefs: Map[ServerId, ActorRef[RaftCmd]] =
-          otherMembers.map { member =>
+          peers.map { member =>
             (member, voteYes(member, monitorProbe))
           }.toMap
 
@@ -344,11 +344,11 @@ class RaftElectionSpec extends UnitSpec() {
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        override def otherMembers = Set(ServerId(40), ServerId(50))
-        override def members: Set[ServerId] = otherMembers + myId
+        override def peers = Set(ServerId(40), ServerId(50))
+        override def members: Set[ServerId] = peers + myId
 
         override def memberRefs: Map[ServerId, ActorRef[RaftCmd]] =
-          otherMembers.map { member =>
+          peers.map { member =>
             (
               member, voteYes(member, monitorProbe)
             )
@@ -408,11 +408,11 @@ class RaftElectionSpec extends UnitSpec() {
 
       implicit val clusterConfig: Cluster = new Cluster {
 
-        override def otherMembers = Set(ServerId(200), ServerId(300))
-        override def members: Set[ServerId] = otherMembers + myId
+        override def peers = Set(ServerId(200), ServerId(300))
+        override def members: Set[ServerId] = peers + myId
 
         override def memberRefs: Map[ServerId, ActorRef[RaftCmd]] =
-          otherMembers.map { member =>
+          peers.map { member =>
             (
               member, voteYes(member, monitorProbe)
             )

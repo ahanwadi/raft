@@ -53,7 +53,7 @@ object Replicator {
        * replicating logs from and matchIndex - index which
        * upto which a follower's logs match with this leader.
        */
-      clusterConfig.otherMembers.foreach { followerId =>
+      clusterConfig.peers.foreach { followerId =>
         sendAppendEntries(followerId)
       }
 

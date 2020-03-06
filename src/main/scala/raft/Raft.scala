@@ -6,11 +6,9 @@ import akka.persistence.typed.scaladsl.Effect.reply
 import akka.persistence.typed.scaladsl.EventSourcedBehavior.CommandHandler
 import akka.persistence.typed.scaladsl.{Effect, EventSourcedBehavior, ReplyEffect}
 import akka.persistence.typed.{PersistenceId, RecoveryCompleted}
-import com.typesafe.config.Config
 import raft.Replicator.LogAppended
 
 import scala.collection.{immutable => im}
-import scala.concurrent.duration.{Duration, FiniteDuration}
 
 /**
   * We use typed akka and akka persistence to model an Raft server.
@@ -23,10 +21,7 @@ object Raft {
                            timers: TimerScheduler[RaftCmd],
                            context: ActorContext[RaftCmd]
                          ): Unit = {
-    val raftConfig: Config = context.system.settings.config.getConfig("raft")
-    val electionTimeout: FiniteDuration =
-      Duration.fromNanos(raftConfig.getDuration("election-timeout").toNanos)
-
+    val electionTimeout = RaftConfig(context.system).electionTimeout
     timers.startSingleTimer(HeartbeatTimeout, HeartbeatTimeout, electionTimeout)
   }
 

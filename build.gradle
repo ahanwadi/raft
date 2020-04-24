@@ -3,8 +3,8 @@ plugins {
     id "com.github.maiflai.scalatest" version "0.25"
 }
 
-ext.scalaVersion = '2.13.1'
-ext.akka_version = '2.6.3'
+ext.scalaVersion = '2.13.2'
+ext.akka_version = '2.6.4'
 
 repositories {
   jcenter()
